@@ -6,7 +6,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import gspread
-from gspread.exceptions import APIError, WorksheetNotFound
+from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 from streamlit_cookies_manager import EncryptedCookieManager
 
@@ -43,7 +43,6 @@ def with_retry(fn, *, tries=4, base_sleep=0.8):
             return fn()
         except APIError as e:
             last = e
-            # Em 429, esperar ajuda; em 403/404, nao adianta muito, mas ainda tenta pouco
             time.sleep(base_sleep * (2 ** i))
         except Exception as e:
             last = e
@@ -98,8 +97,7 @@ def is_active_flag(x) -> bool:
     return str(x).strip().lower() in ["1", "true", "sim", "yes", "y"]
 
 
-# Caches longos para reduzir reads/min
-@st.cache_data(ttl=600)  # 10 min
+@st.cache_data(ttl=600)
 def read_users_df() -> pd.DataFrame:
     sh = open_sheet()
     def _read():
@@ -108,7 +106,7 @@ def read_users_df() -> pd.DataFrame:
     return with_retry(_read)
 
 
-@st.cache_data(ttl=600)  # 10 min
+@st.cache_data(ttl=600)
 def read_itens_df() -> pd.DataFrame:
     sh = open_sheet()
     def _read():
@@ -139,7 +137,6 @@ def append_row(sheet_name: str, row: dict):
     return with_retry(_append)
 
 
-# SALDOS: leitura por item (cache curto)
 @st.cache_data(ttl=15)
 def get_saldo_from_saldos(item_id: str) -> float:
     sh = open_sheet()
@@ -147,20 +144,12 @@ def get_saldo_from_saldos(item_id: str) -> float:
     def _get():
         ws = sh.worksheet("SALDOS")
         headers = ws.row_values(1)
-        try:
-            col_item = headers.index("item_id") + 1
-        except ValueError:
-            col_item = 1
-        try:
-            col_saldo = headers.index("saldo_atual") + 1
-        except ValueError:
-            col_saldo = 2
+        col_item = (headers.index("item_id") + 1) if "item_id" in headers else 1
+        col_saldo = (headers.index("saldo_atual") + 1) if "saldo_atual" in headers else 2
 
-        # Busca item_id na coluna A (ou col_item)
-        col_vals = ws.col_values(col_item)  # inclui header
-        # otimiza: se for curto (50 itens), ok
+        col_vals = ws.col_values(col_item)
         target = str(item_id).strip()
-        for idx, v in enumerate(col_vals[1:], start=2):  # linhas começam em 2
+        for idx, v in enumerate(col_vals[1:], start=2):
             if str(v).strip() == target:
                 raw = ws.cell(idx, col_saldo).value
                 try:
@@ -178,14 +167,8 @@ def set_saldo_in_saldos(item_id: str, new_saldo: float):
     def _set():
         ws = sh.worksheet("SALDOS")
         headers = ws.row_values(1)
-        try:
-            col_item = headers.index("item_id") + 1
-        except ValueError:
-            col_item = 1
-        try:
-            col_saldo = headers.index("saldo_atual") + 1
-        except ValueError:
-            col_saldo = 2
+        col_item = (headers.index("item_id") + 1) if "item_id" in headers else 1
+        col_saldo = (headers.index("saldo_atual") + 1) if "saldo_atual" in headers else 2
 
         col_vals = ws.col_values(col_item)
         target = str(item_id).strip()
@@ -194,14 +177,12 @@ def set_saldo_in_saldos(item_id: str, new_saldo: float):
                 ws.update_cell(idx, col_saldo, float(new_saldo))
                 return True
 
-        # Se nao existe a linha do item, cria no final
         next_row = len(col_vals) + 1
         ws.update_cell(next_row, col_item, target)
         ws.update_cell(next_row, col_saldo, float(new_saldo))
         return True
 
     ok = with_retry(_set)
-    # invalida cache curto do saldo
     try:
         get_saldo_from_saldos.clear()
     except Exception:
@@ -210,22 +191,29 @@ def set_saldo_in_saldos(item_id: str, new_saldo: float):
 
 
 def apply_delta(item_id: str, delta: float) -> float:
-    # Le 1 saldo (cache curto), grava novo saldo
     saldo = get_saldo_from_saldos(item_id)
     novo = float(saldo) + float(delta)
     set_saldo_in_saldos(item_id, novo)
     return novo
 
 
-def clear_item_and_ready_next():
-    try:
-        st.query_params.clear()
-    except Exception:
-        pass
-    st.session_state["typed_item_id"] = ""
-    st.session_state["qty"] = 1.0
+def reset_for_next_item():
+    # NAO mexer diretamente em session_state de widgets ja criados.
+    # Em vez disso, muda a chave do widget para ele reiniciar vazio.
+    st.query_params.clear()
+
+    st.session_state["item_key"] = int(st.session_state.get("item_key", 0)) + 1
+    st.session_state["qty_key"] = int(st.session_state.get("qty_key", 0)) + 1
+
     st.rerun()
 
+
+# -------------------------
+# Estados base
+# -------------------------
+st.session_state.setdefault("mode", "ENTRADA")
+st.session_state.setdefault("item_key", 0)
+st.session_state.setdefault("qty_key", 0)
 
 # -------------------------
 # Login persistente
@@ -237,22 +225,13 @@ if cookie_user_id and "user_id" not in st.session_state:
     st.session_state["user_id"] = str(cookie_user_id)
     st.session_state["user_nome"] = str(cookie_user_nome or "")
 
-st.session_state.setdefault("mode", "ENTRADA")
-st.session_state.setdefault("typed_item_id", "")
-st.session_state.setdefault("qty", 1.0)
-
 # -------------------------
-# Carrega usuarios (cache longo)
+# Usuarios
 # -------------------------
 try:
     users_df = read_users_df()
-except Exception as e:
-    st.error("Falha ao ler USUARIOS (limite do Google Sheets).")
-    st.write("Tente novamente em alguns segundos.")
-    st.stop()
-
-if users_df is None or users_df.empty:
-    st.error("Aba USUARIOS vazia ou nao encontrada.")
+except Exception:
+    st.error("Falha ao ler USUARIOS (limite do Google Sheets). Tente novamente em alguns segundos.")
     st.stop()
 
 if "ativo" in users_df.columns:
@@ -269,7 +248,6 @@ def user_is_active(user_id: str) -> bool:
     return (users_active["user_id"].astype(str) == str(user_id)).any()
 
 
-# Se cookie existe mas usuario nao ativo, derruba login
 if "user_id" in st.session_state and not user_is_active(st.session_state["user_id"]):
     st.session_state.pop("user_id", None)
     st.session_state.pop("user_nome", None)
@@ -278,12 +256,10 @@ if "user_id" in st.session_state and not user_is_active(st.session_state["user_i
     cookies.save()
 
 # -------------------------
-# Login (só se nao logado)
+# Login
 # -------------------------
 if "user_id" not in st.session_state:
     st.title("Estoque")
-    st.caption("Login rápido")
-
     nomes = users_active["nome"].astype(str).tolist()
     nome = st.selectbox("Usuário", nomes)
     pin = st.text_input("PIN", type="password")
@@ -305,7 +281,7 @@ if "user_id" not in st.session_state:
     st.stop()
 
 # -------------------------
-# Header minimalista
+# Header
 # -------------------------
 top = st.columns([3, 1])
 with top[0]:
@@ -322,7 +298,7 @@ with top[1]:
 st.divider()
 
 # -------------------------
-# Seletor de modo (direto)
+# Modo
 # -------------------------
 m1, m2, m3 = st.columns(3)
 with m1:
@@ -339,21 +315,19 @@ st.caption(f"Modo: {st.session_state['mode']}")
 st.divider()
 
 # -------------------------
-# Item: QR ou digitar (sem fricção)
+# Item: QR ou digitar
 # -------------------------
 qp = st.query_params
 param_item = qp.get("item", None)
 
+item_input_key = f"item_input_{st.session_state['item_key']}"
 typed = st.text_input(
     "Item",
-    key="typed_item_id",
+    key=item_input_key,
     placeholder="Escaneie o QR ou digite o ID (ex: PR001)",
 )
 
-if param_item:
-    item_id = str(param_item).strip()
-else:
-    item_id = str(typed).strip()
+item_id = str(param_item).strip() if param_item else str(typed).strip()
 
 go = st.columns([1, 1])
 with go[0]:
@@ -366,7 +340,7 @@ with go[0]:
 with go[1]:
     if st.button("Limpar", use_container_width=True):
         st.query_params.clear()
-        st.session_state["typed_item_id"] = ""
+        st.session_state["item_key"] = st.session_state["item_key"] + 1
         st.rerun()
 
 if not item_id:
@@ -374,7 +348,7 @@ if not item_id:
     st.stop()
 
 # -------------------------
-# Carrega ITENS (cache longo) e SALDO (barato)
+# ITENS (cache longo) e SALDO (cache curto)
 # -------------------------
 try:
     itens_df = read_itens_df()
@@ -390,7 +364,6 @@ if item is None:
 nome_item = str(item.get("nome", item_id))
 unidade = str(item.get("unidade", ""))
 
-# saldo vem de SALDOS (nao de TRANSACOES)
 try:
     saldo_atual = float(get_saldo_from_saldos(item_id))
 except Exception:
@@ -399,9 +372,9 @@ except Exception:
 st.subheader(nome_item)
 st.caption(f"ID: {item_id}  |  Saldo: {saldo_atual:g}  |  Und: {unidade}")
 
-qtd = st.number_input("Quantidade", min_value=0.0, step=1.0, key="qty")
+qty_input_key = f"qty_{st.session_state['qty_key']}"
+qtd = st.number_input("Quantidade", min_value=0.0, step=1.0, value=1.0, key=qty_input_key)
 
-# Confirmação discreta para saldo negativo
 needs_confirm = True
 if st.session_state["mode"] == "SAIDA":
     projected = float(saldo_atual) - float(qtd)
@@ -428,13 +401,12 @@ if st.button(btn_label, use_container_width=True):
             st.error("Marque a confirmação para permitir saldo negativo.")
             st.stop()
 
-    # INVENTARIO: compara contagem vs SALDOS e gera AJUSTE automatico
     if st.session_state["mode"] == "INVENTARIO":
         saldo_teorico = float(saldo_atual)
         contado = float(qtd_f)
         diferenca = float(contado - saldo_teorico)
 
-        # registra contagem (se quiser manter)
+        # Contagem (opcional)
         try:
             append_row("CONTAGENS", {
                 "contagem_id": str(uuid.uuid4()),
@@ -448,7 +420,6 @@ if st.button(btn_label, use_container_width=True):
         except Exception:
             pass
 
-        # se diferenca, grava transacao AJUSTE e atualiza SALDOS
         if abs(diferenca) > 1e-9:
             sinal_store = 1 if diferenca > 0 else -1
 
@@ -464,14 +435,11 @@ if st.button(btn_label, use_container_width=True):
                 "obs": f"Ajuste inventário. Contado {contado:g}, teórico {saldo_teorico:g}.",
             })
 
-            novo = apply_delta(item_id, float(diferenca))
-        else:
-            novo = saldo_teorico
+            apply_delta(item_id, float(diferenca))
 
         toast_ok("Registrado")
-        clear_item_and_ready_next()
+        reset_for_next_item()
 
-    # ENTRADA / SAIDA: grava transacao e atualiza SALDOS
     else:
         if st.session_state["mode"] == "ENTRADA":
             acao = "ENTRADA"
@@ -494,7 +462,7 @@ if st.button(btn_label, use_container_width=True):
             "obs": "",
         })
 
-        novo = apply_delta(item_id, float(delta))
+        apply_delta(item_id, float(delta))
 
         toast_ok("Registrado")
-        clear_item_and_ready_next()
+        reset_for_next_item()
