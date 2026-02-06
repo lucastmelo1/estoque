@@ -6,9 +6,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import gspread
-from gspread.exceptions import APIError
+from gspread.exceptions import APIError, WorksheetNotFound
 from google.oauth2.service_account import Credentials
-
 from streamlit_cookies_manager import EncryptedCookieManager
 
 st.set_page_config(page_title="YV Estoque", layout="centered")
@@ -35,6 +34,28 @@ def gs_client():
         st.secrets["gcp_service_account"], scopes=SCOPE
     )
     return gspread.authorize(creds)
+
+
+def with_retry(fn, *, tries=4, base_sleep=0.8):
+    last = None
+    for i in range(tries):
+        try:
+            return fn()
+        except APIError as e:
+            last = e
+            # Em 429, esperar ajuda; em 403/404, nao adianta muito, mas ainda tenta pouco
+            time.sleep(base_sleep * (2 ** i))
+        except Exception as e:
+            last = e
+            time.sleep(base_sleep * (2 ** i))
+    raise last
+
+
+@st.cache_resource
+def open_sheet():
+    def _open():
+        return gs_client().open_by_key(SPREADSHEET_ID)
+    return with_retry(_open)
 
 
 def normalize_cell(v):
@@ -66,83 +87,34 @@ def normalize_cell(v):
     return str(v)
 
 
-def _apierror_details(e: Exception) -> str:
-    # Mostra o maximo possivel sem expor secrets
-    if isinstance(e, APIError):
-        try:
-            status = getattr(e.response, "status_code", None)
-            text = getattr(e.response, "text", "")
-            return f"APIError status={status} body={text[:500]}"
-        except Exception:
-            return "APIError (sem detalhes)"
-    return f"{type(e).__name__}: {str(e)[:500]}"
-
-
-def with_retry(fn, *, tries=5, base_sleep=0.6):
-    last = None
-    for i in range(tries):
-        try:
-            return fn()
-        except APIError as e:
-            last = e
-            # backoff: 0.6, 1.2, 2.4, 4.8...
-            time.sleep(base_sleep * (2 ** i))
-        except Exception as e:
-            last = e
-            time.sleep(base_sleep * (2 ** i))
-    raise last
-
-
-@st.cache_resource
-def open_sheet():
-    def _open():
-        return gs_client().open_by_key(SPREADSHEET_ID)
-    return with_retry(_open)
-
-
-def read_sheet_df(sheet_name: str) -> pd.DataFrame:
-    sh = open_sheet()
-
-    def _read():
-        ws = sh.worksheet(sheet_name)
-        return pd.DataFrame(ws.get_all_records())
-
-    return with_retry(_read)
-
-
-def append_row(sheet_name: str, row: dict):
-    sh = open_sheet()
-
-    def _append():
-        ws = sh.worksheet(sheet_name)
-        headers = ws.row_values(1)
-        values = [normalize_cell(row.get(h, "")) for h in headers]
-        ws.append_row(values, value_input_option="USER_ENTERED")
-        return True
-
-    return with_retry(_append)
+def toast_ok(msg: str):
+    try:
+        st.toast(msg, icon="✅")
+    except Exception:
+        st.success(msg)
 
 
 def is_active_flag(x) -> bool:
     return str(x).strip().lower() in ["1", "true", "sim", "yes", "y"]
 
 
-def calc_saldos(trans_df: pd.DataFrame) -> pd.DataFrame:
-    if trans_df is None or trans_df.empty:
-        return pd.DataFrame(columns=["item_id", "saldo_atual"])
+# Caches longos para reduzir reads/min
+@st.cache_data(ttl=600)  # 10 min
+def read_users_df() -> pd.DataFrame:
+    sh = open_sheet()
+    def _read():
+        ws = sh.worksheet("USUARIOS")
+        return pd.DataFrame(ws.get_all_records())
+    return with_retry(_read)
 
-    df = trans_df.copy()
-    if "quantidade_efetiva" not in df.columns:
-        df["quantidade_efetiva"] = 0
 
-    df["item_id"] = df["item_id"].astype(str)
-    df["quantidade_efetiva"] = pd.to_numeric(
-        df["quantidade_efetiva"], errors="coerce"
-    ).fillna(0.0)
-
-    out = df.groupby("item_id", as_index=False)["quantidade_efetiva"].sum()
-    out = out.rename(columns={"quantidade_efetiva": "saldo_atual"})
-    return out
+@st.cache_data(ttl=600)  # 10 min
+def read_itens_df() -> pd.DataFrame:
+    sh = open_sheet()
+    def _read():
+        ws = sh.worksheet("ITENS")
+        return pd.DataFrame(ws.get_all_records())
+    return with_retry(_read)
 
 
 def get_item(itens_df: pd.DataFrame, item_id: str):
@@ -156,20 +128,93 @@ def get_item(itens_df: pd.DataFrame, item_id: str):
     return rows.iloc[0]
 
 
-def get_saldo(saldos_df: pd.DataFrame, item_id: str) -> float:
-    if saldos_df is None or saldos_df.empty:
-        return 0.0
-    r = saldos_df[saldos_df["item_id"] == str(item_id)]
-    if r.empty:
-        return 0.0
-    return float(r["saldo_atual"].iloc[0])
+def append_row(sheet_name: str, row: dict):
+    sh = open_sheet()
+    def _append():
+        ws = sh.worksheet(sheet_name)
+        headers = ws.row_values(1)
+        values = [normalize_cell(row.get(h, "")) for h in headers]
+        ws.append_row(values, value_input_option="USER_ENTERED")
+        return True
+    return with_retry(_append)
 
 
-def toast_ok(msg: str):
+# SALDOS: leitura por item (cache curto)
+@st.cache_data(ttl=15)
+def get_saldo_from_saldos(item_id: str) -> float:
+    sh = open_sheet()
+
+    def _get():
+        ws = sh.worksheet("SALDOS")
+        headers = ws.row_values(1)
+        try:
+            col_item = headers.index("item_id") + 1
+        except ValueError:
+            col_item = 1
+        try:
+            col_saldo = headers.index("saldo_atual") + 1
+        except ValueError:
+            col_saldo = 2
+
+        # Busca item_id na coluna A (ou col_item)
+        col_vals = ws.col_values(col_item)  # inclui header
+        # otimiza: se for curto (50 itens), ok
+        target = str(item_id).strip()
+        for idx, v in enumerate(col_vals[1:], start=2):  # linhas começam em 2
+            if str(v).strip() == target:
+                raw = ws.cell(idx, col_saldo).value
+                try:
+                    return float(str(raw).replace(",", "."))
+                except Exception:
+                    return 0.0
+        return 0.0
+
+    return float(with_retry(_get))
+
+
+def set_saldo_in_saldos(item_id: str, new_saldo: float):
+    sh = open_sheet()
+
+    def _set():
+        ws = sh.worksheet("SALDOS")
+        headers = ws.row_values(1)
+        try:
+            col_item = headers.index("item_id") + 1
+        except ValueError:
+            col_item = 1
+        try:
+            col_saldo = headers.index("saldo_atual") + 1
+        except ValueError:
+            col_saldo = 2
+
+        col_vals = ws.col_values(col_item)
+        target = str(item_id).strip()
+        for idx, v in enumerate(col_vals[1:], start=2):
+            if str(v).strip() == target:
+                ws.update_cell(idx, col_saldo, float(new_saldo))
+                return True
+
+        # Se nao existe a linha do item, cria no final
+        next_row = len(col_vals) + 1
+        ws.update_cell(next_row, col_item, target)
+        ws.update_cell(next_row, col_saldo, float(new_saldo))
+        return True
+
+    ok = with_retry(_set)
+    # invalida cache curto do saldo
     try:
-        st.toast(msg, icon="✅")
+        get_saldo_from_saldos.clear()
     except Exception:
-        st.success(msg)
+        pass
+    return ok
+
+
+def apply_delta(item_id: str, delta: float) -> float:
+    # Le 1 saldo (cache curto), grava novo saldo
+    saldo = get_saldo_from_saldos(item_id)
+    novo = float(saldo) + float(delta)
+    set_saldo_in_saldos(item_id, novo)
+    return novo
 
 
 def clear_item_and_ready_next():
@@ -197,13 +242,13 @@ st.session_state.setdefault("typed_item_id", "")
 st.session_state.setdefault("qty", 1.0)
 
 # -------------------------
-# Carrega usuarios
+# Carrega usuarios (cache longo)
 # -------------------------
 try:
-    users_df = read_sheet_df("USUARIOS")
+    users_df = read_users_df()
 except Exception as e:
-    st.error("Falha ao ler USUARIOS.")
-    st.code(_apierror_details(e))
+    st.error("Falha ao ler USUARIOS (limite do Google Sheets).")
+    st.write("Tente novamente em alguns segundos.")
     st.stop()
 
 if users_df is None or users_df.empty:
@@ -217,20 +262,23 @@ else:
 
 users_active = users_df[users_df["ativo_norm"]].copy()
 
+
 def user_is_active(user_id: str) -> bool:
     if users_active.empty or "user_id" not in users_active.columns:
         return False
     return (users_active["user_id"].astype(str) == str(user_id)).any()
 
+
+# Se cookie existe mas usuario nao ativo, derruba login
 if "user_id" in st.session_state and not user_is_active(st.session_state["user_id"]):
-    for k in ["user_id", "user_nome"]:
-        st.session_state.pop(k, None)
+    st.session_state.pop("user_id", None)
+    st.session_state.pop("user_nome", None)
     cookies["user_id"] = ""
     cookies["user_nome"] = ""
     cookies.save()
 
 # -------------------------
-# Login (so se nao logado)
+# Login (só se nao logado)
 # -------------------------
 if "user_id" not in st.session_state:
     st.title("Estoque")
@@ -264,8 +312,8 @@ with top[0]:
     st.caption(f"Logado: {st.session_state.get('user_nome','')}")
 with top[1]:
     if st.button("Sair", use_container_width=True):
-        for k in ["user_id", "user_nome"]:
-            st.session_state.pop(k, None)
+        st.session_state.pop("user_id", None)
+        st.session_state.pop("user_nome", None)
         cookies["user_id"] = ""
         cookies["user_nome"] = ""
         cookies.save()
@@ -291,15 +339,15 @@ st.caption(f"Modo: {st.session_state['mode']}")
 st.divider()
 
 # -------------------------
-# Item: QR ou digitar
+# Item: QR ou digitar (sem fricção)
 # -------------------------
 qp = st.query_params
 param_item = qp.get("item", None)
 
 typed = st.text_input(
-    "Item (QR ou digite o ID)",
+    "Item",
     key="typed_item_id",
-    placeholder="Ex: PR001",
+    placeholder="Escaneie o QR ou digite o ID (ex: PR001)",
 )
 
 if param_item:
@@ -322,21 +370,17 @@ with go[1]:
         st.rerun()
 
 if not item_id:
-    st.info("Escaneie o QR do item ou digite o ID, depois toque em Carregar.")
+    st.info("Escaneie o QR do item ou digite o ID e toque em Carregar.")
     st.stop()
 
 # -------------------------
-# Carrega ITENS e TRANSACOES (com retry)
+# Carrega ITENS (cache longo) e SALDO (barato)
 # -------------------------
 try:
-    itens_df = read_sheet_df("ITENS")
-    trans_df = read_sheet_df("TRANSACOES")
-except Exception as e:
-    st.error("Falha ao acessar a planilha. Pode ser limite temporário do Google.")
-    st.code(_apierror_details(e))
+    itens_df = read_itens_df()
+except Exception:
+    st.error("Falha ao ler ITENS (limite do Google Sheets). Tente novamente em alguns segundos.")
     st.stop()
-
-saldos_df = calc_saldos(trans_df)
 
 item = get_item(itens_df, item_id)
 if item is None:
@@ -345,16 +389,19 @@ if item is None:
 
 nome_item = str(item.get("nome", item_id))
 unidade = str(item.get("unidade", ""))
-saldo_atual = get_saldo(saldos_df, item_id)
 
-# -------------------------
-# Tela do item (limpa)
-# -------------------------
+# saldo vem de SALDOS (nao de TRANSACOES)
+try:
+    saldo_atual = float(get_saldo_from_saldos(item_id))
+except Exception:
+    saldo_atual = 0.0
+
 st.subheader(nome_item)
 st.caption(f"ID: {item_id}  |  Saldo: {saldo_atual:g}  |  Und: {unidade}")
 
 qtd = st.number_input("Quantidade", min_value=0.0, step=1.0, key="qty")
 
+# Confirmação discreta para saldo negativo
 needs_confirm = True
 if st.session_state["mode"] == "SAIDA":
     projected = float(saldo_atual) - float(qtd)
@@ -381,15 +428,15 @@ if st.button(btn_label, use_container_width=True):
             st.error("Marque a confirmação para permitir saldo negativo.")
             st.stop()
 
-    # Inventário: contagem -> ajuste automático (se tiver diferença)
+    # INVENTARIO: compara contagem vs SALDOS e gera AJUSTE automatico
     if st.session_state["mode"] == "INVENTARIO":
         saldo_teorico = float(saldo_atual)
         contado = float(qtd_f)
         diferenca = float(contado - saldo_teorico)
 
-        # tenta registrar contagem (se aba existir)
+        # registra contagem (se quiser manter)
         try:
-            cont_row = {
+            append_row("CONTAGENS", {
                 "contagem_id": str(uuid.uuid4()),
                 "timestamp": now_local_iso(),
                 "item_id": str(item_id),
@@ -397,14 +444,15 @@ if st.button(btn_label, use_container_width=True):
                 "quantidade_contada": float(contado),
                 "diferenca": float(diferenca),
                 "user_id": str(st.session_state.get("user_id", "")),
-            }
-            append_row("CONTAGENS", cont_row)
+            })
         except Exception:
             pass
 
+        # se diferenca, grava transacao AJUSTE e atualiza SALDOS
         if abs(diferenca) > 1e-9:
             sinal_store = 1 if diferenca > 0 else -1
-            trans_row = {
+
+            append_row("TRANSACOES", {
                 "trans_id": str(uuid.uuid4()),
                 "timestamp": now_local_iso(),
                 "item_id": str(item_id),
@@ -414,41 +462,39 @@ if st.button(btn_label, use_container_width=True):
                 "quantidade_efetiva": float(diferenca),
                 "user_id": str(st.session_state.get("user_id", "")),
                 "obs": f"Ajuste inventário. Contado {contado:g}, teórico {saldo_teorico:g}.",
-            }
-            append_row("TRANSACOES", trans_row)
+            })
+
+            novo = apply_delta(item_id, float(diferenca))
+        else:
+            novo = saldo_teorico
 
         toast_ok("Registrado")
         clear_item_and_ready_next()
 
-    # Entrada / Saída
+    # ENTRADA / SAIDA: grava transacao e atualiza SALDOS
     else:
         if st.session_state["mode"] == "ENTRADA":
             acao = "ENTRADA"
+            delta = float(qtd_f)
             sinal_store = 1
-            efetiva = float(qtd_f)
         else:
             acao = "SAIDA"
+            delta = -float(qtd_f)
             sinal_store = -1
-            efetiva = -float(qtd_f)
 
-        row = {
+        append_row("TRANSACOES", {
             "trans_id": str(uuid.uuid4()),
             "timestamp": now_local_iso(),
             "item_id": str(item_id),
             "acao": str(acao),
             "sinal": int(sinal_store),
             "quantidade": float(qtd_f),
-            "quantidade_efetiva": float(efetiva),
+            "quantidade_efetiva": float(delta),
             "user_id": str(st.session_state.get("user_id", "")),
             "obs": "",
-        }
+        })
 
-        try:
-            append_row("TRANSACOES", row)
-        except Exception as e:
-            st.error("Falha ao gravar na planilha (possível limite temporário). Tente novamente em alguns segundos.")
-            st.code(_apierror_details(e))
-            st.stop()
+        novo = apply_delta(item_id, float(delta))
 
         toast_ok("Registrado")
         clear_item_and_ready_next()
