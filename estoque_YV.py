@@ -1,20 +1,14 @@
-# estoque_YV.py
-# Versao minimalista e agil
-# Mudancas principais:
-# 1) Login persistente via cookie (7 dias) - nao pede PIN a cada refresh
-# 2) Tela limpa e direta ao ponto
-# 3) Fluxo continuo: confirmou, volta para "Pronto para proximo item", mantendo modo e login
-
 import streamlit as st
 import pandas as pd
 import uuid
-from datetime import datetime, timedelta
+import time
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import gspread
+from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 
-# Cookie manager (para manter login mesmo apos refresh)
 from streamlit_cookies_manager import EncryptedCookieManager
 
 st.set_page_config(page_title="YV Estoque", layout="centered")
@@ -23,12 +17,10 @@ SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
 SPREADSHEET_ID = st.secrets["SPREADSHEET_ID"]
 TZ = ZoneInfo("America/Sao_Paulo")
 
-# Cookies (usa um prefixo/seed simples)
 cookies = EncryptedCookieManager(
     prefix="yv_estoque",
     password=st.secrets.get("COOKIE_PASSWORD", "troque_isto_nos_secrets"),
 )
-
 if not cookies.ready():
     st.stop()
 
@@ -37,6 +29,7 @@ def now_local_iso() -> str:
     return datetime.now(TZ).isoformat(timespec="seconds")
 
 
+@st.cache_resource
 def gs_client():
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=SCOPE
@@ -47,7 +40,6 @@ def gs_client():
 def normalize_cell(v):
     if v is None:
         return ""
-
     try:
         import numpy as np
         if isinstance(v, (np.integer,)):
@@ -58,40 +50,77 @@ def normalize_cell(v):
             return bool(v)
     except Exception:
         pass
-
     try:
         from decimal import Decimal
         if isinstance(v, Decimal):
             return float(v)
     except Exception:
         pass
-
     try:
         if isinstance(v, (pd.Timestamp,)):
             return v.isoformat()
     except Exception:
         pass
-
     if isinstance(v, (int, float, str, bool)):
         return v
-
     return str(v)
 
 
-@st.cache_data(ttl=8)
+def _apierror_details(e: Exception) -> str:
+    # Mostra o maximo possivel sem expor secrets
+    if isinstance(e, APIError):
+        try:
+            status = getattr(e.response, "status_code", None)
+            text = getattr(e.response, "text", "")
+            return f"APIError status={status} body={text[:500]}"
+        except Exception:
+            return "APIError (sem detalhes)"
+    return f"{type(e).__name__}: {str(e)[:500]}"
+
+
+def with_retry(fn, *, tries=5, base_sleep=0.6):
+    last = None
+    for i in range(tries):
+        try:
+            return fn()
+        except APIError as e:
+            last = e
+            # backoff: 0.6, 1.2, 2.4, 4.8...
+            time.sleep(base_sleep * (2 ** i))
+        except Exception as e:
+            last = e
+            time.sleep(base_sleep * (2 ** i))
+    raise last
+
+
+@st.cache_resource
+def open_sheet():
+    def _open():
+        return gs_client().open_by_key(SPREADSHEET_ID)
+    return with_retry(_open)
+
+
 def read_sheet_df(sheet_name: str) -> pd.DataFrame:
-    sh = gs_client().open_by_key(SPREADSHEET_ID)
-    ws = sh.worksheet(sheet_name)
-    return pd.DataFrame(ws.get_all_records())
+    sh = open_sheet()
+
+    def _read():
+        ws = sh.worksheet(sheet_name)
+        return pd.DataFrame(ws.get_all_records())
+
+    return with_retry(_read)
 
 
 def append_row(sheet_name: str, row: dict):
-    sh = gs_client().open_by_key(SPREADSHEET_ID)
-    ws = sh.worksheet(sheet_name)
-    headers = ws.row_values(1)
+    sh = open_sheet()
 
-    values = [normalize_cell(row.get(h, "")) for h in headers]
-    ws.append_row(values, value_input_option="USER_ENTERED")
+    def _append():
+        ws = sh.worksheet(sheet_name)
+        headers = ws.row_values(1)
+        values = [normalize_cell(row.get(h, "")) for h in headers]
+        ws.append_row(values, value_input_option="USER_ENTERED")
+        return True
+
+    return with_retry(_append)
 
 
 def is_active_flag(x) -> bool:
@@ -144,7 +173,6 @@ def toast_ok(msg: str):
 
 
 def clear_item_and_ready_next():
-    # limpa parametro item e campo digitado para agilizar proximo scan
     try:
         st.query_params.clear()
     except Exception:
@@ -155,7 +183,7 @@ def clear_item_and_ready_next():
 
 
 # -------------------------
-# Restaurar login via cookie
+# Login persistente
 # -------------------------
 cookie_user_id = cookies.get("user_id")
 cookie_user_nome = cookies.get("user_nome")
@@ -169,9 +197,15 @@ st.session_state.setdefault("typed_item_id", "")
 st.session_state.setdefault("qty", 1.0)
 
 # -------------------------
-# Carrega usuarios e valida cookie
+# Carrega usuarios
 # -------------------------
-users_df = read_sheet_df("USUARIOS")
+try:
+    users_df = read_sheet_df("USUARIOS")
+except Exception as e:
+    st.error("Falha ao ler USUARIOS.")
+    st.code(_apierror_details(e))
+    st.stop()
+
 if users_df is None or users_df.empty:
     st.error("Aba USUARIOS vazia ou nao encontrada.")
     st.stop()
@@ -184,31 +218,26 @@ else:
 users_active = users_df[users_df["ativo_norm"]].copy()
 
 def user_is_active(user_id: str) -> bool:
-    if users_active.empty:
-        return False
-    if "user_id" not in users_active.columns:
+    if users_active.empty or "user_id" not in users_active.columns:
         return False
     return (users_active["user_id"].astype(str) == str(user_id)).any()
 
-
-# Se cookie existe mas usuario nao esta ativo, derruba login
 if "user_id" in st.session_state and not user_is_active(st.session_state["user_id"]):
     for k in ["user_id", "user_nome"]:
-        if k in st.session_state:
-            del st.session_state[k]
+        st.session_state.pop(k, None)
     cookies["user_id"] = ""
     cookies["user_nome"] = ""
     cookies.save()
 
 # -------------------------
-# Login (somente se nao estiver logado)
+# Login (so se nao logado)
 # -------------------------
 if "user_id" not in st.session_state:
     st.title("Estoque")
-    st.caption("Login rapido")
+    st.caption("Login rápido")
 
     nomes = users_active["nome"].astype(str).tolist()
-    nome = st.selectbox("Usuario", nomes)
+    nome = st.selectbox("Usuário", nomes)
     pin = st.text_input("PIN", type="password")
 
     if st.button("Entrar", use_container_width=True):
@@ -217,7 +246,6 @@ if "user_id" not in st.session_state:
             st.session_state["user_id"] = str(u.get("user_id", nome))
             st.session_state["user_nome"] = str(u.get("nome", nome))
 
-            # cookie por 7 dias (na pratica, o browser guarda)
             cookies["user_id"] = st.session_state["user_id"]
             cookies["user_nome"] = st.session_state["user_nome"]
             cookies.save()
@@ -237,8 +265,7 @@ with top[0]:
 with top[1]:
     if st.button("Sair", use_container_width=True):
         for k in ["user_id", "user_nome"]:
-            if k in st.session_state:
-                del st.session_state[k]
+            st.session_state.pop(k, None)
         cookies["user_id"] = ""
         cookies["user_nome"] = ""
         cookies.save()
@@ -247,69 +274,73 @@ with top[1]:
 st.divider()
 
 # -------------------------
-# Seletor de modo (bem direto)
+# Seletor de modo (direto)
 # -------------------------
 m1, m2, m3 = st.columns(3)
 with m1:
     if st.button("Entrada", use_container_width=True):
         st.session_state["mode"] = "ENTRADA"
 with m2:
-    if st.button("Saida", use_container_width=True):
+    if st.button("Saída", use_container_width=True):
         st.session_state["mode"] = "SAIDA"
 with m3:
-    if st.button("Inventario", use_container_width=True):
+    if st.button("Inventário", use_container_width=True):
         st.session_state["mode"] = "INVENTARIO"
 
 st.caption(f"Modo: {st.session_state['mode']}")
-
 st.divider()
 
 # -------------------------
-# Identificacao do item: QR ou digitado
-# QR deve apontar para: https://seuapp/?item=PR001
+# Item: QR ou digitar
 # -------------------------
 qp = st.query_params
 param_item = qp.get("item", None)
-typed = st.text_input("Item (QR ou digite o ID)", key="typed_item_id", placeholder="Ex: PR001")
 
-# Se veio via QR, prioriza parametro e mostra em campo (sem confusao)
+typed = st.text_input(
+    "Item (QR ou digite o ID)",
+    key="typed_item_id",
+    placeholder="Ex: PR001",
+)
+
 if param_item:
     item_id = str(param_item).strip()
 else:
     item_id = str(typed).strip()
 
-go_cols = st.columns([1, 1])
-with go_cols[0]:
-    if st.button("Carregar item", use_container_width=True):
+go = st.columns([1, 1])
+with go[0]:
+    if st.button("Carregar", use_container_width=True):
         if item_id:
             st.query_params["item"] = item_id
             st.rerun()
         else:
             st.warning("Informe um item_id ou escaneie um QR.")
-with go_cols[1]:
+with go[1]:
     if st.button("Limpar", use_container_width=True):
-        try:
-            st.query_params.clear()
-        except Exception:
-            pass
+        st.query_params.clear()
         st.session_state["typed_item_id"] = ""
         st.rerun()
 
-# Se ainda nao tem item, para aqui
 if not item_id:
-    st.info("Pronto. Escaneie o QR do item ou digite o ID, depois toque em Carregar item.")
+    st.info("Escaneie o QR do item ou digite o ID, depois toque em Carregar.")
     st.stop()
 
 # -------------------------
-# Carrega dados (itens e transacoes) somente quando precisa
+# Carrega ITENS e TRANSACOES (com retry)
 # -------------------------
-itens_df = read_sheet_df("ITENS")
-trans_df = read_sheet_df("TRANSACOES")
+try:
+    itens_df = read_sheet_df("ITENS")
+    trans_df = read_sheet_df("TRANSACOES")
+except Exception as e:
+    st.error("Falha ao acessar a planilha. Pode ser limite temporário do Google.")
+    st.code(_apierror_details(e))
+    st.stop()
+
 saldos_df = calc_saldos(trans_df)
 
 item = get_item(itens_df, item_id)
 if item is None:
-    st.error(f"Item nao encontrado: {item_id}")
+    st.error(f"Item não encontrado: {item_id}")
     st.stop()
 
 nome_item = str(item.get("nome", item_id))
@@ -320,11 +351,10 @@ saldo_atual = get_saldo(saldos_df, item_id)
 # Tela do item (limpa)
 # -------------------------
 st.subheader(nome_item)
-st.caption(f"ID: {item_id} | Unidade: {unidade} | Saldo: {saldo_atual:g}")
+st.caption(f"ID: {item_id}  |  Saldo: {saldo_atual:g}  |  Und: {unidade}")
 
 qtd = st.number_input("Quantidade", min_value=0.0, step=1.0, key="qty")
 
-# Confirmacao para saldo negativo na saida (bem discreta e so quando precisa)
 needs_confirm = True
 if st.session_state["mode"] == "SAIDA":
     projected = float(saldo_atual) - float(qtd)
@@ -332,14 +362,11 @@ if st.session_state["mode"] == "SAIDA":
         st.warning(f"Vai ficar negativo (proj: {projected:g}).")
         needs_confirm = st.checkbox("Confirmar mesmo assim")
 
-# Botao unico e direto
-btn_label = "Confirmar"
-if st.session_state["mode"] == "ENTRADA":
-    btn_label = "Confirmar entrada"
-elif st.session_state["mode"] == "SAIDA":
-    btn_label = "Confirmar saida"
-else:
-    btn_label = "Confirmar contagem"
+btn_label = {
+    "ENTRADA": "Confirmar entrada",
+    "SAIDA": "Confirmar saída",
+    "INVENTARIO": "Confirmar contagem",
+}[st.session_state["mode"]]
 
 if st.button(btn_label, use_container_width=True):
     qtd_f = float(qtd)
@@ -351,16 +378,16 @@ if st.button(btn_label, use_container_width=True):
     if st.session_state["mode"] == "SAIDA":
         projected = float(saldo_atual) - float(qtd_f)
         if projected < 0 and not needs_confirm:
-            st.error("Marque a confirmacao para permitir saldo negativo.")
+            st.error("Marque a confirmação para permitir saldo negativo.")
             st.stop()
 
-    # Inventario: registra contagem e gera ajuste automatico
+    # Inventário: contagem -> ajuste automático (se tiver diferença)
     if st.session_state["mode"] == "INVENTARIO":
         saldo_teorico = float(saldo_atual)
         contado = float(qtd_f)
         diferenca = float(contado - saldo_teorico)
 
-        # CONTAGENS (se sua aba existir)
+        # tenta registrar contagem (se aba existir)
         try:
             cont_row = {
                 "contagem_id": str(uuid.uuid4()),
@@ -375,7 +402,6 @@ if st.button(btn_label, use_container_width=True):
         except Exception:
             pass
 
-        # AJUSTE se necessario
         if abs(diferenca) > 1e-9:
             sinal_store = 1 if diferenca > 0 else -1
             trans_row = {
@@ -387,14 +413,14 @@ if st.button(btn_label, use_container_width=True):
                 "quantidade": float(abs(diferenca)),
                 "quantidade_efetiva": float(diferenca),
                 "user_id": str(st.session_state.get("user_id", "")),
-                "obs": f"Ajuste inventario. Contado {contado:g}, teorico {saldo_teorico:g}.",
+                "obs": f"Ajuste inventário. Contado {contado:g}, teórico {saldo_teorico:g}.",
             }
             append_row("TRANSACOES", trans_row)
 
         toast_ok("Registrado")
         clear_item_and_ready_next()
 
-    # Entrada ou saida
+    # Entrada / Saída
     else:
         if st.session_state["mode"] == "ENTRADA":
             acao = "ENTRADA"
@@ -416,7 +442,13 @@ if st.button(btn_label, use_container_width=True):
             "user_id": str(st.session_state.get("user_id", "")),
             "obs": "",
         }
-        append_row("TRANSACOES", row)
+
+        try:
+            append_row("TRANSACOES", row)
+        except Exception as e:
+            st.error("Falha ao gravar na planilha (possível limite temporário). Tente novamente em alguns segundos.")
+            st.code(_apierror_details(e))
+            st.stop()
 
         toast_ok("Registrado")
         clear_item_and_ready_next()
