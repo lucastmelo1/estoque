@@ -3,8 +3,10 @@
 # 1) QR fixo abre o app (home)
 # 2) Login (USUARIOS)
 # 3) Seleciona modo: ENTRADA, SAIDA, INVENTARIO
-# 4) Escaneia QR do item (URL com ?item=PR001) e registra em lote
-# 5) Confirma e já fica pronto para o próximo scan
+# 4) Escaneia QR do item (?item=PR001) e registra em lote
+# 5) Modo turbo: digita/cola item_id para agilizar
+# 6) Botao "Proximo item" para continuar sem atrito
+# 7) Bloqueio opcional para saida com saldo negativo
 
 import streamlit as st
 import pandas as pd
@@ -23,7 +25,6 @@ TZ = ZoneInfo("America/Sao_Paulo")
 
 
 def now_local_iso() -> str:
-    # Ex: 2026-02-06T09:18:00-03:00
     return datetime.now(TZ).isoformat(timespec="seconds")
 
 
@@ -97,14 +98,16 @@ def calc_saldos(trans_df: pd.DataFrame) -> pd.DataFrame:
         df["quantidade_efetiva"] = 0
 
     df["item_id"] = df["item_id"].astype(str)
-    df["quantidade_efetiva"] = pd.to_numeric(df["quantidade_efetiva"], errors="coerce").fillna(0.0)
+    df["quantidade_efetiva"] = pd.to_numeric(
+        df["quantidade_efetiva"], errors="coerce"
+    ).fillna(0.0)
 
     out = df.groupby("item_id", as_index=False)["quantidade_efetiva"].sum()
     out = out.rename(columns={"quantidade_efetiva": "saldo_atual"})
     return out
 
 
-def get_item(itens_df: pd.DataFrame, item_id: str) -> pd.Series | None:
+def get_item(itens_df: pd.DataFrame, item_id: str):
     if itens_df is None or itens_df.empty or "item_id" not in itens_df.columns:
         return None
     df = itens_df.copy()
@@ -125,7 +128,6 @@ def get_saldo(saldos_df: pd.DataFrame, item_id: str) -> float:
 
 
 def toast_ok(msg: str):
-    # st.toast é ótimo, mas se não estiver disponível na versão, cai no st.success
     try:
         st.toast(msg, icon="✅")
     except Exception:
@@ -134,6 +136,12 @@ def toast_ok(msg: str):
 
 def set_mode(mode: str):
     st.session_state["mode"] = mode
+
+
+def clear_item_param_and_go_wait():
+    # Volta para tela "aguardando scan"
+    st.query_params.clear()
+    st.rerun()
 
 
 def mode_selector():
@@ -155,8 +163,44 @@ def mode_selector():
     st.caption(f"Modo atual: {st.session_state.get('mode','ENTRADA')}")
 
 
+def turbo_panel():
+    st.subheader("Modo turbo")
+    st.caption("Cole o item_id e vá direto para o item, sem câmera.")
+    typed = st.text_input("item_id", value="", placeholder="Ex: PR001, LT010, VN022")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Ir para o item", use_container_width=True):
+            tid = str(typed).strip()
+            if tid:
+                st.query_params["item"] = tid
+                st.rerun()
+            else:
+                st.warning("Informe um item_id.")
+    with c2:
+        if st.button("Limpar", use_container_width=True):
+            st.rerun()
+
+
 # -------------------------
-# Load users and login
+# Sidebar: opções globais
+# -------------------------
+with st.sidebar:
+    st.title("Configurações")
+    st.session_state.setdefault("mode", "ENTRADA")
+    st.session_state.setdefault("turbo", True)
+    st.session_state.setdefault("block_negative", True)
+
+    st.session_state["turbo"] = st.toggle("Modo turbo", value=st.session_state["turbo"])
+    st.session_state["block_negative"] = st.toggle(
+        "Bloquear saldo negativo na saída", value=st.session_state["block_negative"]
+    )
+
+    st.caption("QR fixo do sistema: abra a home do app.")
+    st.caption("QR dos itens: https://.../?item=PR001")
+
+
+# -------------------------
+# Login
 # -------------------------
 users_df = read_sheet_df("USUARIOS")
 if users_df is None or users_df.empty:
@@ -175,7 +219,6 @@ if users_active.empty:
 
 if "user_id" not in st.session_state:
     st.title("Login")
-
     nomes = users_active["nome"].astype(str).tolist()
     nome = st.selectbox("Usuário", nomes)
     pin = st.text_input("PIN", type="password")
@@ -186,15 +229,14 @@ if "user_id" not in st.session_state:
             st.session_state["user_id"] = str(u.get("user_id", nome))
             st.session_state["user_nome"] = str(u.get("nome", nome))
             st.session_state["perfil"] = str(u.get("perfil", ""))
-            st.session_state.setdefault("mode", "ENTRADA")
             toast_ok("Login realizado")
             st.rerun()
         else:
             st.error("PIN incorreto")
     st.stop()
 
-# Header
 st.caption(f"Logado: {st.session_state.get('user_nome','')}")
+
 
 # -------------------------
 # Load data
@@ -209,28 +251,34 @@ saldos_df = calc_saldos(trans_df)
 mode_selector()
 
 # -------------------------
+# Turbo panel (optional)
+# -------------------------
+if st.session_state.get("turbo", True):
+    turbo_panel()
+
+# -------------------------
 # Routing by query param item
 # -------------------------
 qp = st.query_params
 item_id = qp.get("item", None)
 
-# Quick instructions
 with st.expander("Como usar (rápido)"):
-    st.write("1) Escolha um modo acima (Entrada, Saida ou Inventario).")
-    st.write("2) Escaneie o QR do item. O QR deve abrir o link com ?item=ID do item.")
-    st.write("3) Informe quantidade e confirme. Repita para o próximo item.")
+    st.write("1) Escolha um modo (Entrada, Saida ou Inventario).")
+    st.write("2) Escaneie o QR do item, ou use o Modo turbo para colar o item_id.")
+    st.write("3) Informe a quantidade e confirme. Repita para o próximo item.")
     st.write("Dica: mantenha esta tela aberta e só vá escaneando os QRs na sequência.")
 
-# If no item scanned yet, show a lightweight panel
 if not item_id:
-    st.subheader("Aguardando scan de item")
-    st.info("Escaneie o QR de um item para registrar. O QR deve abrir esta URL com ?item=SEU_ITEM_ID.")
+    st.subheader("Aguardando item")
+    st.info("Escaneie o QR de um item (link com ?item=SEU_ITEM_ID) ou use o Modo turbo.")
     st.stop()
 
 item_id = str(item_id).strip()
 item = get_item(itens_df, item_id)
 if item is None:
     st.error(f"Item não encontrado: {item_id}")
+    if st.button("Voltar", use_container_width=True):
+        clear_item_param_and_go_wait()
     st.stop()
 
 nome_item = str(item.get("nome", item_id))
@@ -253,17 +301,36 @@ with meta[3]:
 
 mode = st.session_state.get("mode", "ENTRADA")
 
-# Default qty
-if "last_qty" not in st.session_state:
-    st.session_state["last_qty"] = 1.0
-
-qtd = st.number_input("Quantidade", min_value=0.0, step=1.0, value=float(st.session_state["last_qty"]))
+st.session_state.setdefault("last_qty", 1.0)
+qtd = st.number_input(
+    "Quantidade",
+    min_value=0.0,
+    step=1.0,
+    value=float(st.session_state["last_qty"]),
+)
 
 obs = st.text_input("Observação (opcional)", value="")
 
-# INVENTARIO: opção de registrar contagem física que gera ajuste automático
+# Botões de navegação rápida
+nav1, nav2 = st.columns(2)
+with nav1:
+    if st.button("Próximo item", use_container_width=True):
+        clear_item_param_and_go_wait()
+with nav2:
+    if st.button("Logout", use_container_width=True):
+        for k in ["user_id", "user_nome", "perfil"]:
+            if k in st.session_state:
+                del st.session_state[k]
+        st.query_params.clear()
+        st.rerun()
+
+st.divider()
+
+# -------------------------
+# INVENTARIO
+# -------------------------
 if mode == "INVENTARIO":
-    st.caption("Inventário: informe a quantidade contada fisicamente. O sistema calcula diferença e registra ajuste automaticamente.")
+    st.caption("Inventário: informe a quantidade contada fisicamente. O sistema calcula a diferença e registra ajuste.")
     if st.button("Confirmar contagem", use_container_width=True):
         qtd_f = float(qtd)
         if qtd_f < 0:
@@ -273,7 +340,6 @@ if mode == "INVENTARIO":
         saldo_teorico = float(saldo_atual)
         diferenca = float(qtd_f - saldo_teorico)
 
-        # Sempre registra contagem
         cont_row = {
             "contagem_id": str(uuid.uuid4()),
             "timestamp": now_local_iso(),
@@ -286,10 +352,8 @@ if mode == "INVENTARIO":
         try:
             append_row("CONTAGENS", cont_row)
         except Exception:
-            # Se você não quiser usar CONTAGENS, pode deixar a aba existir vazia
             pass
 
-        # Se houver diferença, registra AJUSTE em transações
         if abs(diferenca) > 1e-9:
             sinal_store = 1 if diferenca > 0 else -1
             trans_row = {
@@ -307,18 +371,33 @@ if mode == "INVENTARIO":
 
         st.session_state["last_qty"] = 1.0
         toast_ok("Item registrado no inventário")
-        # Mantém a tela pronta para o próximo scan
-        st.query_params.clear()
-        st.rerun()
+        clear_item_param_and_go_wait()
 
+# -------------------------
+# ENTRADA / SAIDA
+# -------------------------
 else:
-    # ENTRADA ou SAIDA
-    label = "Confirmar entrada" if mode == "ENTRADA" else "Confirmar saída"
+    is_saida = (mode == "SAIDA")
+    label = "Confirmar entrada" if not is_saida else "Confirmar saída"
+
+    confirm_negative = True
+    if is_saida and st.session_state.get("block_negative", True):
+        projected = float(saldo_atual) - float(qtd)
+        if projected < 0:
+            st.warning(f"Esta saída deixará saldo negativo (projetado: {projected:g}).")
+            confirm_negative = st.checkbox("Confirmar saída mesmo assim")
+
     if st.button(label, use_container_width=True):
         qtd_f = float(qtd)
         if qtd_f <= 0:
             st.error("Quantidade precisa ser maior que zero.")
             st.stop()
+
+        if is_saida and st.session_state.get("block_negative", True):
+            projected = float(saldo_atual) - float(qtd_f)
+            if projected < 0 and not confirm_negative:
+                st.error("Marque a confirmação para permitir saldo negativo.")
+                st.stop()
 
         if mode == "ENTRADA":
             efetiva = float(qtd_f)
@@ -344,14 +423,4 @@ else:
         append_row("TRANSACOES", row)
         st.session_state["last_qty"] = 1.0
         toast_ok("Item registrado com sucesso")
-        # Pronto para o próximo scan no mesmo modo
-        st.query_params.clear()
-        st.rerun()
-
-# Botão de logout simples
-st.divider()
-if st.button("Sair do login"):
-    for k in ["user_id", "user_nome", "perfil"]:
-        if k in st.session_state:
-            del st.session_state[k]
-    st.rerun()
+        clear_item_param_and_go_wait()
