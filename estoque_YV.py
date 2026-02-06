@@ -10,6 +10,9 @@ from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 from streamlit_cookies_manager import EncryptedCookieManager
 
+# =========================
+# Config
+# =========================
 st.set_page_config(page_title="YV Estoque", layout="centered")
 
 SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -23,9 +26,171 @@ cookies = EncryptedCookieManager(
 if not cookies.ready():
     st.stop()
 
+# =========================
+# UI CSS (remove faixas + inputs evidentes)
+# =========================
+st.markdown(
+    """
+<style>
+:root{
+  --bg: #F4EFE3;
+  --card: #FFFFFF;
+  --ink: #0E1B2A;
+  --muted: rgba(14,27,42,0.62);
+  --border: rgba(14,27,42,0.12);
+  --shadow: rgba(14,27,42,0.07);
 
+  --accent-in: #0E1B2A;
+  --accent-out: #8B1E1E;
+  --accent-inv: #2B3A78;
+
+  --field-bg: rgba(14,27,42,0.04);
+  --field-border: rgba(14,27,42,0.25);
+}
+
+html, body, [class*="stApp"]{
+  background: var(--bg) !important;
+  color: var(--ink);
+}
+
+.block-container{
+  padding-top: 0.6rem !important;
+  padding-bottom: 1.2rem !important;
+  max-width: 720px;
+}
+
+/* remove divider/hrs */
+hr{ display:none !important; height:0 !important; margin:0 !important; }
+
+/* wrappers que viram "faixas" no mobile */
+[data-testid="stHorizontalBlock"],
+[data-testid="stVerticalBlock"],
+[data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="stBlock"]{
+  min-height: 0 !important;
+}
+
+/* colunas costumam gerar linhas vazias no iOS */
+[data-testid="column"]{
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+}
+
+/* remove containers vazios */
+div[data-testid="stMarkdownContainer"]:empty{ display:none !important; }
+div.element-container:has(> div:empty){ display:none !important; }
+
+/* cards */
+.yv-card{
+  background: var(--card);
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 26px var(--shadow);
+  padding: 14px;
+}
+
+.yv-shell{ display:flex; flex-direction:column; gap: 12px; }
+
+.yv-top{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 12px;
+}
+
+.yv-who{
+  font-weight: 800;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.yv-title{ margin: 0; font-weight: 900; letter-spacing: 0.3px; }
+.yv-sub{ margin: 6px 0 0 0; color: var(--muted); font-size: 0.95rem; }
+
+.yv-chip{
+  display:inline-flex;
+  align-items:center;
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-weight: 900;
+  background: rgba(14,27,42,0.06);
+  border: 1px solid rgba(14,27,42,0.12);
+}
+
+/* modo como botões segmentados */
+.yv-mode .stRadio > div{ background: transparent; border: none; padding: 0; box-shadow: none; }
+.yv-mode [role="radiogroup"]{ display:flex; gap: 10px; margin-top: 10px; }
+.yv-mode [role="radio"]{
+  flex: 1 1 0;
+  border-radius: 14px;
+  padding: 10px 10px;
+  border: 1px solid var(--border);
+  background: #fff;
+  font-weight: 900;
+  justify-content:center;
+}
+.yv-mode [role="radio"][aria-checked="true"]{ color:#fff !important; border-color: transparent; }
+.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="ENTRADA"]{ background: var(--accent-in); }
+.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="SAIDA"]{ background: var(--accent-out); }
+.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="INVENTARIO"]{ background: var(--accent-inv); }
+.yv-mode [role="radio"][aria-checked="true"] *{ color:#fff !important; }
+
+/* inputs bem evidentes */
+div[data-baseweb="input"] input,
+div[data-baseweb="textarea"] textarea{
+  background: var(--field-bg) !important;
+  border: 2px solid var(--field-border) !important;
+  border-radius: 14px !important;
+  font-weight: 800 !important;
+}
+div[data-baseweb="input"] input:focus,
+div[data-baseweb="textarea"] textarea:focus{
+  border: 2px solid rgba(14,27,42,0.55) !important;
+  outline: none !important;
+}
+
+/* botões */
+button[kind="primary"]{
+  border-radius: 14px !important;
+  font-weight: 900 !important;
+  padding: 0.9rem 1rem !important;
+  box-shadow: 0 10px 20px rgba(14,27,42,0.18) !important;
+}
+button{ border-radius: 12px !important; }
+
+/* reduzir margens padrão */
+.stTextInput, .stNumberInput, .stRadio{
+  margin-top: 0.15rem !important;
+  margin-bottom: 0.15rem !important;
+}
+
+@media (max-width: 480px){
+  .block-container{ padding-left: 0.8rem; padding-right: 0.8rem; }
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# =========================
+# Helpers
+# =========================
 def now_local_iso() -> str:
     return datetime.now(TZ).isoformat(timespec="seconds")
+
+
+def with_retry(fn, *, tries=3, base_sleep=0.7):
+    last = None
+    for i in range(tries):
+        try:
+            return fn()
+        except APIError as e:
+            last = e
+            time.sleep(base_sleep * (2**i))
+        except Exception as e:
+            last = e
+            time.sleep(base_sleep * (2**i))
+    raise last
 
 
 @st.cache_resource
@@ -36,24 +201,11 @@ def gs_client():
     return gspread.authorize(creds)
 
 
-def with_retry(fn, *, tries=3, base_sleep=0.7):
-    last = None
-    for i in range(tries):
-        try:
-            return fn()
-        except APIError as e:
-            last = e
-            time.sleep(base_sleep * (2 ** i))
-        except Exception as e:
-            last = e
-            time.sleep(base_sleep * (2 ** i))
-    raise last
-
-
 @st.cache_resource
 def open_sheet():
     def _open():
         return gs_client().open_by_key(SPREADSHEET_ID)
+
     return with_retry(_open)
 
 
@@ -62,6 +214,7 @@ def normalize_cell(v):
         return ""
     try:
         import numpy as np
+
         if isinstance(v, (np.integer,)):
             return int(v)
         if isinstance(v, (np.floating,)):
@@ -72,6 +225,7 @@ def normalize_cell(v):
         pass
     try:
         from decimal import Decimal
+
         if isinstance(v, Decimal):
             return float(v)
     except Exception:
@@ -97,7 +251,18 @@ def is_manager_row(row: pd.Series) -> bool:
     for c in candidates:
         if c in row.index:
             v = str(row.get(c, "")).strip().lower()
-            if v in ["gestor", "admin", "administrador", "manager", "owner", "true", "1", "sim", "yes", "y"]:
+            if v in [
+                "gestor",
+                "admin",
+                "administrador",
+                "manager",
+                "owner",
+                "true",
+                "1",
+                "sim",
+                "yes",
+                "y",
+            ]:
                 return True
     return False
 
@@ -105,24 +270,29 @@ def is_manager_row(row: pd.Series) -> bool:
 @st.cache_data(ttl=600)
 def read_users_df() -> pd.DataFrame:
     sh = open_sheet()
+
     def _read():
         ws = sh.worksheet("USUARIOS")
         return pd.DataFrame(ws.get_all_records())
+
     return with_retry(_read)
 
 
 @st.cache_data(ttl=600)
 def read_itens_df() -> pd.DataFrame:
     sh = open_sheet()
+
     def _read():
         ws = sh.worksheet("ITENS")
         return pd.DataFrame(ws.get_all_records())
+
     return with_retry(_read)
 
 
 @st.cache_data(ttl=30)
 def read_saldos_df() -> pd.DataFrame:
     sh = open_sheet()
+
     def _read():
         ws = sh.worksheet("SALDOS")
         df = pd.DataFrame(ws.get_all_records())
@@ -135,18 +305,25 @@ def read_saldos_df() -> pd.DataFrame:
         df["item_id"] = df["item_id"].astype(str).str.strip().str.upper()
         df["saldo_atual"] = pd.to_numeric(df["saldo_atual"], errors="coerce").fillna(0.0)
         return df[["item_id", "saldo_atual"]].copy()
+
     return with_retry(_read)
 
 
 def append_row(sheet_name: str, row: dict):
     sh = open_sheet()
+
     def _append():
         ws = sh.worksheet(sheet_name)
         headers = ws.row_values(1)
         values = [normalize_cell(row.get(h, "")) for h in headers]
         ws.append_row(values, value_input_option="USER_ENTERED")
         return True
+
     return with_retry(_append)
+
+
+def normalize_item_id(x: str) -> str:
+    return str(x or "").strip().upper()
 
 
 def get_item(itens_df: pd.DataFrame, item_id: str):
@@ -164,8 +341,8 @@ def get_saldo_cached(item_id: str) -> float:
     df = read_saldos_df()
     if df is None or df.empty:
         return 0.0
-    item_id = str(item_id).strip().upper()
-    r = df[df["item_id"] == item_id]
+    iid = str(item_id).strip().upper()
+    r = df[df["item_id"] == iid]
     if r.empty:
         return 0.0
     return float(r["saldo_atual"].iloc[0])
@@ -173,7 +350,7 @@ def get_saldo_cached(item_id: str) -> float:
 
 def set_saldo_in_saldos(item_id: str, new_saldo: float):
     sh = open_sheet()
-    item_id = str(item_id).strip().upper()
+    iid = str(item_id).strip().upper()
 
     def _set():
         ws = sh.worksheet("SALDOS")
@@ -183,12 +360,12 @@ def set_saldo_in_saldos(item_id: str, new_saldo: float):
 
         col_vals = ws.col_values(col_item)
         for idx, v in enumerate(col_vals[1:], start=2):
-            if str(v).strip().upper() == item_id:
+            if str(v).strip().upper() == iid:
                 ws.update_cell(idx, col_saldo, float(new_saldo))
                 return True
 
         next_row = len(col_vals) + 1
-        ws.update_cell(next_row, col_item, item_id)
+        ws.update_cell(next_row, col_item, iid)
         ws.update_cell(next_row, col_saldo, float(new_saldo))
         return True
 
@@ -214,155 +391,25 @@ def reset_for_next_item():
     st.rerun()
 
 
-# --------------------
-# CSS: remove "faixas" e reforça inputs
-# --------------------
-st.markdown(
-    """
-<style>
-:root{
-  --bg: #F4EFE3;
-  --card: #FFFFFF;
-  --ink: #0E1B2A;
-  --muted: rgba(14,27,42,0.62);
-  --border: rgba(14,27,42,0.12);
-  --shadow: rgba(14,27,42,0.07);
-
-  --accent-in: #0E1B2A;
-  --accent-out: #8B1E1E;
-  --accent-inv: #2B3A78;
-
-  --field-bg: rgba(14,27,42,0.04);
-  --field-border: rgba(14,27,42,0.22);
-}
-
-html, body, [class*="stApp"]{
-  background: var(--bg) !important;
-  color: var(--ink);
-}
-
-.block-container{
-  padding-top: 0.8rem;
-  padding-bottom: 1.8rem;
-  max-width: 720px;
-}
-
-/* Kill accidental horizontal bars / dividers */
-hr { display:none !important; height:0 !important; }
-
-/* Remove any weird empty blocks spacing */
-.element-container:has(> div:empty){ display:none; }
-
-.yv-shell{ display:flex; flex-direction:column; gap: 14px; }
-
-.yv-card{
-  background: var(--card);
-  border-radius: 16px;
-  border: 1px solid var(--border);
-  box-shadow: 0 12px 26px var(--shadow);
-  padding: 14px 14px;
-}
-
-/* Top bar compact (no long "strip") */
-.yv-topbar{
-  padding: 10px 12px;
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap: 12px;
-}
-.yv-who{
-  font-weight: 800;
-  color: var(--muted);
-  font-size: 0.95rem;
-}
-.yv-title{ margin: 0; font-weight: 900; letter-spacing: 0.3px; }
-.yv-sub{ margin: 6px 0 0 0; color: var(--muted); font-size: 0.95rem; }
-
-.yv-chip{
-  display:inline-flex;
-  align-items:center;
-  border-radius: 999px;
-  padding: 8px 12px;
-  font-weight: 900;
-  background: rgba(14,27,42,0.06);
-  border: 1px solid rgba(14,27,42,0.12);
-}
-
-/* Mode segmented (no big whitespace) */
-.yv-mode .stRadio > div{ background: transparent; border: none; padding: 0; box-shadow: none; }
-.yv-mode [role="radiogroup"]{ display:flex; gap: 10px; margin-top: 10px; }
-.yv-mode [role="radio"]{
-  flex: 1 1 0;
-  border-radius: 14px;
-  padding: 10px 10px;
-  border: 1px solid var(--border);
-  background: #fff;
-  font-weight: 900;
-  justify-content:center;
-}
-.yv-mode [role="radio"][aria-checked="true"]{ color:#fff !important; border-color: transparent; }
-.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="ENTRADA"]{ background: var(--accent-in); }
-.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="SAIDA"]{ background: var(--accent-out); }
-.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="INVENTARIO"]{ background: var(--accent-inv); }
-.yv-mode [role="radio"][aria-checked="true"] *{ color:#fff !important; }
-
-/* Make inputs OBVIOUS: darker border + slightly tinted bg */
-div[data-baseweb="input"] input,
-div[data-baseweb="textarea"] textarea{
-  background: var(--field-bg) !important;
-  border: 2px solid var(--field-border) !important;
-  border-radius: 14px !important;
-  font-weight: 800 !important;
-}
-
-/* Number input also */
-div[data-baseweb="input"] input:focus,
-div[data-baseweb="textarea"] textarea:focus{
-  outline: none !important;
-  border: 2px solid rgba(14,27,42,0.45) !important;
-}
-
-/* Primary buttons: strong */
-button[kind="primary"]{
-  border-radius: 14px !important;
-  font-weight: 900 !important;
-  padding: 0.95rem 1rem !important;
-  box-shadow: 0 10px 20px rgba(14,27,42,0.18) !important;
-}
-button{ border-radius: 12px !important; }
-
-/* Reduce margins that create "strips" */
-.stTextInput, .stNumberInput { margin-top: 0.35rem !important; }
-
-@media (max-width: 480px){
-  .block-container{ padding-left: 0.8rem; padding-right: 0.8rem; }
-  .yv-title{ font-size: 1.55rem; }
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-# --------------------
-# Base state
-# --------------------
+# =========================
+# Session defaults
+# =========================
 st.session_state.setdefault("mode", "ENTRADA")
 st.session_state.setdefault("item_key", 0)
 st.session_state.setdefault("qty_key", 0)
 
-# --------------------
-# Login persistente
-# --------------------
+# =========================
+# Persistent login from cookies
+# =========================
 cookie_user_id = cookies.get("user_id")
 cookie_user_nome = cookies.get("user_nome")
 if cookie_user_id and "user_id" not in st.session_state:
     st.session_state["user_id"] = str(cookie_user_id)
     st.session_state["user_nome"] = str(cookie_user_nome or "")
 
-# --------------------
-# Users
-# --------------------
+# =========================
+# Load users
+# =========================
 users_df = read_users_df()
 if "ativo" in users_df.columns:
     users_df["ativo_norm"] = users_df["ativo"].apply(is_active_flag)
@@ -384,6 +431,7 @@ def user_row_by_id(user_id: str):
         return None
     return r.iloc[0]
 
+# if cookie points to non-existent user
 if "user_id" in st.session_state:
     urow = user_row_by_id(st.session_state["user_id"])
     if urow is None:
@@ -393,9 +441,9 @@ if "user_id" in st.session_state:
         cookies["user_nome"] = ""
         cookies.save()
 
-# --------------------
+# =========================
 # Login screen
-# --------------------
+# =========================
 if "user_id" not in st.session_state:
     st.markdown('<div class="yv-shell">', unsafe_allow_html=True)
     st.markdown('<div class="yv-card">', unsafe_allow_html=True)
@@ -424,9 +472,9 @@ if "user_id" not in st.session_state:
     st.markdown("</div></div>", unsafe_allow_html=True)
     st.stop()
 
-# --------------------
-# Sidebar consulta (gestor)
-# --------------------
+# =========================
+# Sidebar: saldo only for manager
+# =========================
 urow = user_row_by_id(st.session_state["user_id"])
 is_manager = bool(is_manager_row(urow)) if urow is not None else False
 
@@ -452,7 +500,7 @@ with st.sidebar:
                     iid = str(r["item_id"]).strip().upper()
                     nm = str(r.get("nome", iid))
                     s = get_saldo_cached(iid)
-                    st.write(f"**{iid}**  |  {nm}")
+                    st.write(f"**{iid}** | {nm}")
                     st.write(f"Saldo: **{s:g}**")
                     st.divider()
         else:
@@ -460,24 +508,26 @@ with st.sidebar:
     else:
         st.info("Acesso restrito ao nível gestor.")
 
-# --------------------
-# Top (compact, no strips)
-# --------------------
+# =========================
+# Top area (no st.columns, avoids iOS strips)
+# =========================
 st.markdown('<div class="yv-shell">', unsafe_allow_html=True)
-st.markdown('<div class="yv-card yv-topbar">', unsafe_allow_html=True)
-c1, c2 = st.columns([3, 1])
-with c1:
-    st.markdown(f'<div class="yv-who">Logado: {st.session_state.get("user_nome","")}</div>', unsafe_allow_html=True)
-with c2:
-    if st.button("Sair", use_container_width=True):
-        st.session_state.pop("user_id", None)
-        st.session_state.pop("user_nome", None)
-        cookies["user_id"] = ""
-        cookies["user_nome"] = ""
-        cookies.save()
-        st.rerun()
 
-st.markdown('<div class="yv-mode">', unsafe_allow_html=True)
+st.markdown('<div class="yv-card yv-top">', unsafe_allow_html=True)
+st.markdown(
+    f'<div class="yv-who">Logado: {st.session_state.get("user_nome","")}</div>',
+    unsafe_allow_html=True,
+)
+if st.button("Sair", use_container_width=False):
+    st.session_state.pop("user_id", None)
+    st.session_state.pop("user_nome", None)
+    cookies["user_id"] = ""
+    cookies["user_nome"] = ""
+    cookies.save()
+    st.rerun()
+st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown('<div class="yv-card yv-mode">', unsafe_allow_html=True)
 mode = st.radio(
     "Modo",
     options=["ENTRADA", "SAIDA", "INVENTARIO"],
@@ -486,16 +536,13 @@ mode = st.radio(
     label_visibility="collapsed",
 )
 st.session_state["mode"] = mode
-st.markdown("</div></div>", unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
 
-# --------------------
-# Item input: auto-load, caps
-# --------------------
+# =========================
+# Item input: auto load on Enter, always uppercase
+# =========================
 qp = st.query_params
 param_item = qp.get("item", None)
-
-def normalize_item_id(x: str) -> str:
-    return str(x or "").strip().upper()
 
 def on_item_change(key: str):
     raw = st.session_state.get(key, "")
@@ -506,24 +553,11 @@ def on_item_change(key: str):
 
 item_input_key = f"item_input_{st.session_state['item_key']}"
 
-if param_item:
-    item_id = normalize_item_id(param_item)
-    st.markdown('<div class="yv-card">', unsafe_allow_html=True)
-    st.markdown(f'<span class="yv-chip">Item: {item_id}</span>', unsafe_allow_html=True)
-    st.markdown('<p class="yv-sub">Trocar item: digite outro ID e pressione Enter</p>', unsafe_allow_html=True)
-    st.text_input(
-        "Trocar item",
-        key=item_input_key,
-        placeholder="Ex: PR002",
-        on_change=on_item_change,
-        args=(item_input_key,),
-        label_visibility="collapsed",
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-else:
+if not param_item:
     st.markdown('<div class="yv-card">', unsafe_allow_html=True)
     st.markdown('<h2 class="yv-title" style="font-size:1.25rem;">Item</h2>', unsafe_allow_html=True)
     st.markdown('<p class="yv-sub">Digite o ID e pressione Enter</p>', unsafe_allow_html=True)
+
     st.text_input(
         "Item",
         key=item_input_key,
@@ -535,28 +569,46 @@ else:
     st.markdown("</div></div>", unsafe_allow_html=True)
     st.stop()
 
-# --------------------
+item_id = normalize_item_id(param_item)
+
+# Allow quick change of item even when already loaded
+st.markdown('<div class="yv-card">', unsafe_allow_html=True)
+st.markdown(f'<span class="yv-chip">Item atual: {item_id}</span>', unsafe_allow_html=True)
+st.markdown('<p class="yv-sub">Trocar item: digite outro ID e pressione Enter</p>', unsafe_allow_html=True)
+st.text_input(
+    "Trocar item",
+    key=item_input_key,
+    placeholder="Ex: PR002",
+    on_change=on_item_change,
+    args=(item_input_key,),
+    label_visibility="collapsed",
+)
+st.markdown("</div>", unsafe_allow_html=True)
+
+# =========================
 # Load item + saldo
-# --------------------
+# =========================
 itens_df = read_itens_df()
 item = get_item(itens_df, item_id)
+
 if item is None:
+    st.markdown('<div class="yv-card">', unsafe_allow_html=True)
     st.error(f"Item não encontrado: {item_id}")
     st.caption("Verifique o ID e tente novamente.")
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div></div>", unsafe_allow_html=True)
     st.stop()
 
 nome_item = str(item.get("nome", item_id))
 unidade = str(item.get("unidade", ""))
 saldo_atual = float(get_saldo_cached(item_id))
 
-# --------------------
-# Action card: inputs highlighted, no visual confusion
-# --------------------
+# =========================
+# Action card
+# =========================
 st.markdown('<div class="yv-card">', unsafe_allow_html=True)
 st.markdown(f'<h1 class="yv-title">{nome_item}</h1>', unsafe_allow_html=True)
 st.markdown(
-    f'<p class="yv-sub">ID: <b>{item_id}</b> &nbsp; | &nbsp; Und: <b>{unidade}</b> &nbsp; | &nbsp; Saldo: <b>{saldo_atual:g}</b></p>',
+    f'<p class="yv-sub">ID: <b>{item_id}</b> | Und: <b>{unidade}</b> | Saldo: <b>{saldo_atual:g}</b></p>',
     unsafe_allow_html=True,
 )
 
@@ -589,38 +641,47 @@ if st.button(btn_label, type="primary", use_container_width=True):
             st.error("Marque a confirmação para permitir saldo negativo.")
             st.stop()
 
+    # INVENTARIO: grava contagem, cria ajuste e aplica delta
     if st.session_state["mode"] == "INVENTARIO":
         saldo_teorico = float(saldo_atual)
         contado = float(qtd_f)
         diferenca = float(contado - saldo_teorico)
 
+        # contagem
         try:
-            append_row("CONTAGENS", {
-                "contagem_id": str(uuid.uuid4()),
-                "timestamp": now_local_iso(),
-                "item_id": str(item_id),
-                "saldo_teorico_no_momento": float(saldo_teorico),
-                "quantidade_contada": float(contado),
-                "diferenca": float(diferenca),
-                "user_id": str(st.session_state.get("user_id", "")),
-            })
+            append_row(
+                "CONTAGENS",
+                {
+                    "contagem_id": str(uuid.uuid4()),
+                    "timestamp": now_local_iso(),
+                    "item_id": str(item_id),
+                    "saldo_teorico_no_momento": float(saldo_teorico),
+                    "quantidade_contada": float(contado),
+                    "diferenca": float(diferenca),
+                    "user_id": str(st.session_state.get("user_id", "")),
+                },
+            )
         except Exception:
             pass
 
+        # ajuste se necessário
         if abs(diferenca) > 1e-9:
             sinal_store = 1 if diferenca > 0 else -1
 
-            append_row("TRANSACOES", {
-                "trans_id": str(uuid.uuid4()),
-                "timestamp": now_local_iso(),
-                "item_id": str(item_id),
-                "acao": "AJUSTE",
-                "sinal": int(sinal_store),
-                "quantidade": float(abs(diferenca)),
-                "quantidade_efetiva": float(diferenca),
-                "user_id": str(st.session_state.get("user_id", "")),
-                "obs": f"Ajuste inventário. Contado {contado:g}, teorico {saldo_teorico:g}.",
-            })
+            append_row(
+                "TRANSACOES",
+                {
+                    "trans_id": str(uuid.uuid4()),
+                    "timestamp": now_local_iso(),
+                    "item_id": str(item_id),
+                    "acao": "AJUSTE",
+                    "sinal": int(sinal_store),
+                    "quantidade": float(abs(diferenca)),
+                    "quantidade_efetiva": float(diferenca),
+                    "user_id": str(st.session_state.get("user_id", "")),
+                    "obs": f"Ajuste inventário. Contado {contado:g}, teorico {saldo_teorico:g}.",
+                },
+            )
 
             apply_delta(item_id, float(diferenca))
 
@@ -628,6 +689,7 @@ if st.button(btn_label, type="primary", use_container_width=True):
         reset_for_next_item()
 
     else:
+        # ENTRADA / SAIDA
         if st.session_state["mode"] == "ENTRADA":
             acao = "ENTRADA"
             delta = float(qtd_f)
@@ -637,17 +699,20 @@ if st.button(btn_label, type="primary", use_container_width=True):
             delta = -float(qtd_f)
             sinal_store = -1
 
-        append_row("TRANSACOES", {
-            "trans_id": str(uuid.uuid4()),
-            "timestamp": now_local_iso(),
-            "item_id": str(item_id),
-            "acao": str(acao),
-            "sinal": int(sinal_store),
-            "quantidade": float(qtd_f),
-            "quantidade_efetiva": float(delta),
-            "user_id": str(st.session_state.get("user_id", "")),
-            "obs": "",
-        })
+        append_row(
+            "TRANSACOES",
+            {
+                "trans_id": str(uuid.uuid4()),
+                "timestamp": now_local_iso(),
+                "item_id": str(item_id),
+                "acao": str(acao),
+                "sinal": int(sinal_store),
+                "quantidade": float(qtd_f),
+                "quantidade_efetiva": float(delta),
+                "user_id": str(st.session_state.get("user_id", "")),
+                "obs": "",
+            },
+        )
 
         apply_delta(item_id, float(delta))
 
