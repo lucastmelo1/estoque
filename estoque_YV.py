@@ -10,9 +10,6 @@ from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 from streamlit_cookies_manager import EncryptedCookieManager
 
-# --------------------
-# Config
-# --------------------
 st.set_page_config(page_title="YV Estoque", layout="centered")
 
 SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -73,14 +70,12 @@ def normalize_cell(v):
             return bool(v)
     except Exception:
         pass
-
     try:
         from decimal import Decimal
         if isinstance(v, Decimal):
             return float(v)
     except Exception:
         pass
-
     if isinstance(v, (int, float, str, bool)):
         return v
     return str(v)
@@ -93,19 +88,11 @@ def toast_ok(msg: str):
         st.success(msg)
 
 
-def toast_warn(msg: str):
-    try:
-        st.toast(msg, icon="⚠️")
-    except Exception:
-        st.warning(msg)
-
-
 def is_active_flag(x) -> bool:
     return str(x).strip().lower() in ["1", "true", "sim", "yes", "y"]
 
 
 def is_manager_row(row: pd.Series) -> bool:
-    # Aceita varias colunas para flexibilidade
     candidates = ["nivel", "perfil", "role", "gestor", "is_manager"]
     for c in candidates:
         if c in row.index:
@@ -200,7 +187,6 @@ def set_saldo_in_saldos(item_id: str, new_saldo: float):
                 ws.update_cell(idx, col_saldo, float(new_saldo))
                 return True
 
-        # cria linha se nao existir
         next_row = len(col_vals) + 1
         ws.update_cell(next_row, col_item, item_id)
         ws.update_cell(next_row, col_saldo, float(new_saldo))
@@ -222,7 +208,6 @@ def apply_delta(item_id: str, delta: float) -> float:
 
 
 def reset_for_next_item():
-    # nao mexer no state do widget ja criado, trocar chaves
     st.query_params.clear()
     st.session_state["item_key"] = int(st.session_state.get("item_key", 0)) + 1
     st.session_state["qty_key"] = int(st.session_state.get("qty_key", 0)) + 1
@@ -230,21 +215,22 @@ def reset_for_next_item():
 
 
 # --------------------
-# UI Styles (mobile friendly)
+# Styles (cleaner, less "fake inputs")
 # --------------------
 st.markdown(
     """
 <style>
 :root{
-  --bg: #FAF5E6;
+  --bg: #F4EFE3;
   --card: #FFFFFF;
-  --ink: #1B2A41;
-  --muted: #4A4A4A;
-  --soft: #EFE6D5;
-  --soft-border: #DED0B6;
-  --ok: #1B2A41;
-  --danger: #9A2C2C;
-  --shadow: rgba(27,42,65,0.12);
+  --ink: #0E1B2A;
+  --muted: rgba(14,27,42,0.62);
+  --border: rgba(14,27,42,0.10);
+  --shadow: rgba(14,27,42,0.08);
+
+  --accent-in: #0E1B2A;     /* entrada */
+  --accent-out: #8B1E1E;    /* saida */
+  --accent-inv: #2B3A78;    /* inventario */
 }
 
 html, body, [class*="stApp"]{
@@ -253,84 +239,130 @@ html, body, [class*="stApp"]{
 }
 
 .block-container{
-  padding-top: 1rem;
-  padding-bottom: 2rem;
+  padding-top: 0.8rem;
+  padding-bottom: 2.0rem;
   max-width: 720px;
+}
+
+.yv-shell{
+  display:flex;
+  flex-direction:column;
+  gap: 14px;
+}
+
+.yv-topbar{
+  background: rgba(255,255,255,0.65);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 18px var(--shadow);
+}
+
+.yv-toprow{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 12px;
+}
+
+.yv-who{
+  font-weight: 700;
+  color: var(--muted);
+  font-size: 0.95rem;
 }
 
 .yv-card{
   background: var(--card);
   border-radius: 16px;
-  box-shadow: 0 10px 25px var(--shadow);
-  padding: 16px 16px;
-  border: 1px solid rgba(222,208,182,0.55);
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 26px var(--shadow);
+  padding: 14px 14px;
 }
 
 .yv-title{
-  font-weight: 800;
-  letter-spacing: 0.5px;
   margin: 0;
-  color: var(--ink);
+  font-weight: 900;
+  letter-spacing: 0.3px;
 }
 
 .yv-sub{
+  margin: 6px 0 0 0;
   color: var(--muted);
-  margin-top: 6px;
-  margin-bottom: 0;
   font-size: 0.95rem;
 }
 
 .yv-chip{
-  display:inline-block;
-  background: var(--soft);
-  border: 1px solid var(--soft-border);
-  border-radius: 10px;
+  display:inline-flex;
+  gap: 8px;
+  align-items:center;
+  background: rgba(14,27,42,0.06);
+  border: 1px solid rgba(14,27,42,0.10);
+  border-radius: 999px;
   padding: 8px 10px;
-  font-weight: 650;
-  color: var(--ink);
+  font-weight: 800;
 }
 
-.yv-seg .stRadio > div{
-  background: var(--card);
-  border-radius: 14px;
-  border: 1px solid rgba(222,208,182,0.7);
-  padding: 8px 10px;
-  box-shadow: 0 8px 18px rgba(27,42,65,0.06);
+.yv-mode{
+  margin-top: 10px;
 }
-.yv-seg label{
-  font-weight: 700;
+
+.yv-mode .stRadio > div{
+  background: transparent;
+  border: none;
+  padding: 0;
+  box-shadow: none;
 }
-.yv-seg [role="radiogroup"]{
+.yv-mode [role="radiogroup"]{
   display:flex;
-  gap:10px;
-  justify-content:space-between;
+  gap: 10px;
 }
-.yv-seg [role="radio"]{
+.yv-mode [role="radio"]{
   flex: 1 1 0;
-  border-radius: 12px;
+  border-radius: 14px;
   padding: 10px 10px;
-  border: 1px solid rgba(222,208,182,0.65);
+  border: 1px solid var(--border);
   background: #fff;
+  font-weight: 900;
+  justify-content:center;
 }
-.yv-seg [role="radio"][aria-checked="true"]{
-  background: var(--ink);
-  border-color: var(--ink);
-  color: #fff;
+.yv-mode [role="radio"] *{
+  font-weight: 900;
 }
-.yv-seg [role="radio"][aria-checked="true"] *{
-  color: #fff !important;
+.yv-mode [role="radio"][aria-checked="true"]{
+  color:#fff !important;
+  border-color: transparent;
+}
+.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="ENTRADA"]{
+  background: var(--accent-in);
+}
+.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="SAIDA"]{
+  background: var(--accent-out);
+}
+.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="INVENTARIO"]{
+  background: var(--accent-inv);
+}
+.yv-mode [role="radio"][aria-checked="true"] *{
+  color:#fff !important;
 }
 
 button[kind="primary"]{
+  border-radius: 14px !important;
+  font-weight: 900 !important;
+  padding: 0.9rem 1rem !important;
+  box-shadow: 0 10px 20px rgba(14,27,42,0.18) !important;
+}
+
+button{
   border-radius: 12px !important;
-  font-weight: 800 !important;
-  padding: 0.85rem 1rem !important;
-  box-shadow: 0 8px 18px rgba(27,42,65,0.18) !important;
+}
+
+input{
+  border-radius: 14px !important;
 }
 
 @media (max-width: 480px){
-  .block-container{ padding-left: 0.9rem; padding-right: 0.9rem; }
-  .yv-title{ font-size: 1.65rem; }
+  .block-container{ padding-left: 0.8rem; padding-right: 0.8rem; }
+  .yv-title{ font-size: 1.55rem; }
 }
 </style>
 """,
@@ -390,6 +422,7 @@ if "user_id" in st.session_state:
 # Login screen
 # --------------------
 if "user_id" not in st.session_state:
+    st.markdown('<div class="yv-shell">', unsafe_allow_html=True)
     st.markdown('<div class="yv-card">', unsafe_allow_html=True)
     st.markdown('<h1 class="yv-title">Estoque</h1>', unsafe_allow_html=True)
     st.markdown('<p class="yv-sub">Login rápido</p>', unsafe_allow_html=True)
@@ -413,11 +446,11 @@ if "user_id" not in st.session_state:
         else:
             st.error("PIN incorreto")
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div></div>", unsafe_allow_html=True)
     st.stop()
 
 # --------------------
-# Sidebar (consulta saldo, restrita a gestor)
+# Sidebar consulta (gestor)
 # --------------------
 urow = user_row_by_id(st.session_state["user_id"])
 is_manager = bool(is_manager_row(urow)) if urow is not None else False
@@ -427,7 +460,6 @@ with st.sidebar:
     if is_manager:
         itens_df_for_side = read_itens_df()
         q = st.text_input("Buscar item (ID ou nome)", placeholder="Ex: PR001 ou File mignon")
-
         if q:
             q_norm = str(q).strip().upper()
             df = itens_df_for_side.copy()
@@ -454,12 +486,14 @@ with st.sidebar:
         st.info("Acesso restrito ao nível gestor.")
 
 # --------------------
-# Header minimalista
+# Topbar
 # --------------------
-top = st.columns([3, 1])
-with top[0]:
-    st.caption(f"Logado: {st.session_state.get('user_nome','')}")
-with top[1]:
+st.markdown('<div class="yv-shell">', unsafe_allow_html=True)
+st.markdown('<div class="yv-topbar">', unsafe_allow_html=True)
+c1, c2 = st.columns([3, 1])
+with c1:
+    st.markdown(f'<div class="yv-who">Logado: {st.session_state.get("user_nome","")}</div>', unsafe_allow_html=True)
+with c2:
     if st.button("Sair", use_container_width=True):
         st.session_state.pop("user_id", None)
         st.session_state.pop("user_nome", None)
@@ -468,10 +502,7 @@ with top[1]:
         cookies.save()
         st.rerun()
 
-# --------------------
-# Mode selector with highlight (segmented)
-# --------------------
-st.markdown('<div class="yv-seg">', unsafe_allow_html=True)
+st.markdown('<div class="yv-mode">', unsafe_allow_html=True)
 mode = st.radio(
     "Modo",
     options=["ENTRADA", "SAIDA", "INVENTARIO"],
@@ -479,15 +510,11 @@ mode = st.radio(
     index=["ENTRADA", "SAIDA", "INVENTARIO"].index(st.session_state.get("mode", "ENTRADA")),
     label_visibility="collapsed",
 )
-st.markdown("</div>", unsafe_allow_html=True)
 st.session_state["mode"] = mode
-
-st.markdown("<br>", unsafe_allow_html=True)
+st.markdown("</div></div>", unsafe_allow_html=True)
 
 # --------------------
-# Item input: no "Carregar" button
-# - If QR uses ?item=PR001, auto opens item
-# - If typed, on_change sets query param and reruns
+# Item input: auto-load, caps
 # --------------------
 qp = st.query_params
 param_item = qp.get("item", None)
@@ -504,17 +531,15 @@ def on_item_change(key: str):
 
 item_input_key = f"item_input_{st.session_state['item_key']}"
 
-# If arrived via QR, we keep param and show a compact chip, plus an optional quick change field
 if param_item:
     item_id = normalize_item_id(param_item)
     st.markdown('<div class="yv-card">', unsafe_allow_html=True)
     st.markdown(f'<span class="yv-chip">Item: {item_id}</span>', unsafe_allow_html=True)
-    st.markdown('<p class="yv-sub">Para trocar, digite outro ID e pressione Enter</p>', unsafe_allow_html=True)
-
+    st.markdown('<p class="yv-sub">Para trocar: digite outro ID e pressione Enter</p>', unsafe_allow_html=True)
     st.text_input(
         "Trocar item",
         key=item_input_key,
-        placeholder="Digite novo ID (ex: PR002) e pressione Enter",
+        placeholder="Ex: PR002",
         on_change=on_item_change,
         args=(item_input_key,),
         label_visibility="collapsed",
@@ -522,9 +547,8 @@ if param_item:
     st.markdown("</div>", unsafe_allow_html=True)
 else:
     st.markdown('<div class="yv-card">', unsafe_allow_html=True)
-    st.markdown('<h2 class="yv-title" style="font-size:1.35rem;">Escanear ou digitar item</h2>', unsafe_allow_html=True)
+    st.markdown('<h2 class="yv-title" style="font-size:1.35rem;">Item</h2>', unsafe_allow_html=True)
     st.markdown('<p class="yv-sub">Digite o ID e pressione Enter</p>', unsafe_allow_html=True)
-
     st.text_input(
         "Item",
         key=item_input_key,
@@ -533,8 +557,7 @@ else:
         args=(item_input_key,),
         label_visibility="collapsed",
     )
-
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div></div>", unsafe_allow_html=True)
     st.stop()
 
 # --------------------
@@ -544,7 +567,8 @@ itens_df = read_itens_df()
 item = get_item(itens_df, item_id)
 if item is None:
     st.error(f"Item não encontrado: {item_id}")
-    st.caption("Verifique o ID ou tente novamente.")
+    st.caption("Verifique o ID e tente novamente.")
+    st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
 nome_item = str(item.get("nome", item_id))
@@ -552,11 +576,9 @@ unidade = str(item.get("unidade", ""))
 saldo_atual = float(get_saldo_cached(item_id))
 
 # --------------------
-# Main card
+# Action card (single clear area)
 # --------------------
-st.markdown("<br>", unsafe_allow_html=True)
 st.markdown('<div class="yv-card">', unsafe_allow_html=True)
-
 st.markdown(f'<h1 class="yv-title">{nome_item}</h1>', unsafe_allow_html=True)
 st.markdown(
     f'<p class="yv-sub">ID: <b>{item_id}</b> &nbsp; | &nbsp; Und: <b>{unidade}</b> &nbsp; | &nbsp; Saldo: <b>{saldo_atual:g}</b></p>',
@@ -564,22 +586,13 @@ st.markdown(
 )
 
 qty_input_key = f"qty_{st.session_state['qty_key']}"
-qtd = st.number_input(
-    "Quantidade",
-    min_value=0.0,
-    step=1.0,
-    value=1.0,
-    key=qty_input_key,
-)
+qtd = st.number_input("Quantidade", min_value=0.0, step=1.0, value=1.0, key=qty_input_key)
 
 needs_confirm = True
 if st.session_state["mode"] == "SAIDA":
     projected = float(saldo_atual) - float(qtd)
     if projected < 0:
-        st.markdown(
-            f"<p style='color: var(--danger); font-weight:800;'>Atenção: saldo negativo projetado ({projected:g})</p>",
-            unsafe_allow_html=True,
-        )
+        st.error(f"Saldo negativo projetado: {projected:g}")
         needs_confirm = st.checkbox("Confirmar mesmo assim")
 
 btn_label = {
@@ -601,13 +614,11 @@ if st.button(btn_label, type="primary", use_container_width=True):
             st.error("Marque a confirmação para permitir saldo negativo.")
             st.stop()
 
-    # INVENTARIO: compara com SALDOS e ajusta
     if st.session_state["mode"] == "INVENTARIO":
         saldo_teorico = float(saldo_atual)
         contado = float(qtd_f)
         diferenca = float(contado - saldo_teorico)
 
-        # contagem (opcional)
         try:
             append_row("CONTAGENS", {
                 "contagem_id": str(uuid.uuid4()),
@@ -641,7 +652,6 @@ if st.button(btn_label, type="primary", use_container_width=True):
         toast_ok("Registrado")
         reset_for_next_item()
 
-    # ENTRADA / SAIDA
     else:
         if st.session_state["mode"] == "ENTRADA":
             acao = "ENTRADA"
@@ -669,12 +679,4 @@ if st.button(btn_label, type="primary", use_container_width=True):
         toast_ok("Registrado")
         reset_for_next_item()
 
-st.markdown("</div>", unsafe_allow_html=True)
-
-# Quick actions
-c1, c2 = st.columns(2)
-with c1:
-    if st.button("Limpar item", use_container_width=True):
-        reset_for_next_item()
-with c2:
-    st.caption("Dica: use QR com ?item=PR001 para abrir direto.")
+st.markdown("</div></div>", unsafe_allow_html=True)
