@@ -215,7 +215,7 @@ def reset_for_next_item():
 
 
 # --------------------
-# Styles (cleaner, less "fake inputs")
+# CSS: remove "faixas" e reforça inputs
 # --------------------
 st.markdown(
     """
@@ -225,12 +225,15 @@ st.markdown(
   --card: #FFFFFF;
   --ink: #0E1B2A;
   --muted: rgba(14,27,42,0.62);
-  --border: rgba(14,27,42,0.10);
-  --shadow: rgba(14,27,42,0.08);
+  --border: rgba(14,27,42,0.12);
+  --shadow: rgba(14,27,42,0.07);
 
-  --accent-in: #0E1B2A;     /* entrada */
-  --accent-out: #8B1E1E;    /* saida */
-  --accent-inv: #2B3A78;    /* inventario */
+  --accent-in: #0E1B2A;
+  --accent-out: #8B1E1E;
+  --accent-inv: #2B3A78;
+
+  --field-bg: rgba(14,27,42,0.04);
+  --field-border: rgba(14,27,42,0.22);
 }
 
 html, body, [class*="stApp"]{
@@ -240,36 +243,17 @@ html, body, [class*="stApp"]{
 
 .block-container{
   padding-top: 0.8rem;
-  padding-bottom: 2.0rem;
+  padding-bottom: 1.8rem;
   max-width: 720px;
 }
 
-.yv-shell{
-  display:flex;
-  flex-direction:column;
-  gap: 14px;
-}
+/* Kill accidental horizontal bars / dividers */
+hr { display:none !important; height:0 !important; }
 
-.yv-topbar{
-  background: rgba(255,255,255,0.65);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 10px 12px;
-  box-shadow: 0 8px 18px var(--shadow);
-}
+/* Remove any weird empty blocks spacing */
+.element-container:has(> div:empty){ display:none; }
 
-.yv-toprow{
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap: 12px;
-}
-
-.yv-who{
-  font-weight: 700;
-  color: var(--muted);
-  font-size: 0.95rem;
-}
+.yv-shell{ display:flex; flex-direction:column; gap: 14px; }
 
 .yv-card{
   background: var(--card);
@@ -279,43 +263,35 @@ html, body, [class*="stApp"]{
   padding: 14px 14px;
 }
 
-.yv-title{
-  margin: 0;
-  font-weight: 900;
-  letter-spacing: 0.3px;
+/* Top bar compact (no long "strip") */
+.yv-topbar{
+  padding: 10px 12px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 12px;
 }
-
-.yv-sub{
-  margin: 6px 0 0 0;
+.yv-who{
+  font-weight: 800;
   color: var(--muted);
   font-size: 0.95rem;
 }
+.yv-title{ margin: 0; font-weight: 900; letter-spacing: 0.3px; }
+.yv-sub{ margin: 6px 0 0 0; color: var(--muted); font-size: 0.95rem; }
 
 .yv-chip{
   display:inline-flex;
-  gap: 8px;
   align-items:center;
-  background: rgba(14,27,42,0.06);
-  border: 1px solid rgba(14,27,42,0.10);
   border-radius: 999px;
-  padding: 8px 10px;
-  font-weight: 800;
+  padding: 8px 12px;
+  font-weight: 900;
+  background: rgba(14,27,42,0.06);
+  border: 1px solid rgba(14,27,42,0.12);
 }
 
-.yv-mode{
-  margin-top: 10px;
-}
-
-.yv-mode .stRadio > div{
-  background: transparent;
-  border: none;
-  padding: 0;
-  box-shadow: none;
-}
-.yv-mode [role="radiogroup"]{
-  display:flex;
-  gap: 10px;
-}
+/* Mode segmented (no big whitespace) */
+.yv-mode .stRadio > div{ background: transparent; border: none; padding: 0; box-shadow: none; }
+.yv-mode [role="radiogroup"]{ display:flex; gap: 10px; margin-top: 10px; }
 .yv-mode [role="radio"]{
   flex: 1 1 0;
   border-radius: 14px;
@@ -325,40 +301,39 @@ html, body, [class*="stApp"]{
   font-weight: 900;
   justify-content:center;
 }
-.yv-mode [role="radio"] *{
-  font-weight: 900;
-}
-.yv-mode [role="radio"][aria-checked="true"]{
-  color:#fff !important;
-  border-color: transparent;
-}
-.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="ENTRADA"]{
-  background: var(--accent-in);
-}
-.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="SAIDA"]{
-  background: var(--accent-out);
-}
-.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="INVENTARIO"]{
-  background: var(--accent-inv);
-}
-.yv-mode [role="radio"][aria-checked="true"] *{
-  color:#fff !important;
+.yv-mode [role="radio"][aria-checked="true"]{ color:#fff !important; border-color: transparent; }
+.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="ENTRADA"]{ background: var(--accent-in); }
+.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="SAIDA"]{ background: var(--accent-out); }
+.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="INVENTARIO"]{ background: var(--accent-inv); }
+.yv-mode [role="radio"][aria-checked="true"] *{ color:#fff !important; }
+
+/* Make inputs OBVIOUS: darker border + slightly tinted bg */
+div[data-baseweb="input"] input,
+div[data-baseweb="textarea"] textarea{
+  background: var(--field-bg) !important;
+  border: 2px solid var(--field-border) !important;
+  border-radius: 14px !important;
+  font-weight: 800 !important;
 }
 
+/* Number input also */
+div[data-baseweb="input"] input:focus,
+div[data-baseweb="textarea"] textarea:focus{
+  outline: none !important;
+  border: 2px solid rgba(14,27,42,0.45) !important;
+}
+
+/* Primary buttons: strong */
 button[kind="primary"]{
   border-radius: 14px !important;
   font-weight: 900 !important;
-  padding: 0.9rem 1rem !important;
+  padding: 0.95rem 1rem !important;
   box-shadow: 0 10px 20px rgba(14,27,42,0.18) !important;
 }
+button{ border-radius: 12px !important; }
 
-button{
-  border-radius: 12px !important;
-}
-
-input{
-  border-radius: 14px !important;
-}
+/* Reduce margins that create "strips" */
+.stTextInput, .stNumberInput { margin-top: 0.35rem !important; }
 
 @media (max-width: 480px){
   .block-container{ padding-left: 0.8rem; padding-right: 0.8rem; }
@@ -386,7 +361,7 @@ if cookie_user_id and "user_id" not in st.session_state:
     st.session_state["user_nome"] = str(cookie_user_nome or "")
 
 # --------------------
-# Load users
+# Users
 # --------------------
 users_df = read_users_df()
 if "ativo" in users_df.columns:
@@ -486,10 +461,10 @@ with st.sidebar:
         st.info("Acesso restrito ao nível gestor.")
 
 # --------------------
-# Topbar
+# Top (compact, no strips)
 # --------------------
 st.markdown('<div class="yv-shell">', unsafe_allow_html=True)
-st.markdown('<div class="yv-topbar">', unsafe_allow_html=True)
+st.markdown('<div class="yv-card yv-topbar">', unsafe_allow_html=True)
 c1, c2 = st.columns([3, 1])
 with c1:
     st.markdown(f'<div class="yv-who">Logado: {st.session_state.get("user_nome","")}</div>', unsafe_allow_html=True)
@@ -535,7 +510,7 @@ if param_item:
     item_id = normalize_item_id(param_item)
     st.markdown('<div class="yv-card">', unsafe_allow_html=True)
     st.markdown(f'<span class="yv-chip">Item: {item_id}</span>', unsafe_allow_html=True)
-    st.markdown('<p class="yv-sub">Para trocar: digite outro ID e pressione Enter</p>', unsafe_allow_html=True)
+    st.markdown('<p class="yv-sub">Trocar item: digite outro ID e pressione Enter</p>', unsafe_allow_html=True)
     st.text_input(
         "Trocar item",
         key=item_input_key,
@@ -547,7 +522,7 @@ if param_item:
     st.markdown("</div>", unsafe_allow_html=True)
 else:
     st.markdown('<div class="yv-card">', unsafe_allow_html=True)
-    st.markdown('<h2 class="yv-title" style="font-size:1.35rem;">Item</h2>', unsafe_allow_html=True)
+    st.markdown('<h2 class="yv-title" style="font-size:1.25rem;">Item</h2>', unsafe_allow_html=True)
     st.markdown('<p class="yv-sub">Digite o ID e pressione Enter</p>', unsafe_allow_html=True)
     st.text_input(
         "Item",
@@ -576,7 +551,7 @@ unidade = str(item.get("unidade", ""))
 saldo_atual = float(get_saldo_cached(item_id))
 
 # --------------------
-# Action card (single clear area)
+# Action card: inputs highlighted, no visual confusion
 # --------------------
 st.markdown('<div class="yv-card">', unsafe_allow_html=True)
 st.markdown(f'<h1 class="yv-title">{nome_item}</h1>', unsafe_allow_html=True)
