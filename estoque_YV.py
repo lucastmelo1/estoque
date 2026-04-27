@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import uuid
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import gspread
@@ -18,6 +18,7 @@ st.set_page_config(page_title="YV Estoque", layout="centered")
 SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
 SPREADSHEET_ID = st.secrets["SPREADSHEET_ID"]
 TZ = ZoneInfo("America/Sao_Paulo")
+LOGIN_TTL_DAYS = 7
 
 cookies = EncryptedCookieManager(
     prefix="yv_estoque",
@@ -27,7 +28,7 @@ if not cookies.ready():
     st.stop()
 
 # =========================
-# UI CSS (remove faixas + inputs evidentes)
+# UI CSS
 # =========================
 st.markdown(
     """
@@ -59,10 +60,8 @@ html, body, [class*="stApp"]{
   max-width: 720px;
 }
 
-/* remove divider/hrs */
 hr{ display:none !important; height:0 !important; margin:0 !important; }
 
-/* wrappers que viram "faixas" no mobile */
 [data-testid="stHorizontalBlock"],
 [data-testid="stVerticalBlock"],
 [data-testid="stVerticalBlockBorderWrapper"],
@@ -70,17 +69,14 @@ hr{ display:none !important; height:0 !important; margin:0 !important; }
   min-height: 0 !important;
 }
 
-/* colunas costumam gerar linhas vazias no iOS */
 [data-testid="column"]{
   padding-top: 0 !important;
   padding-bottom: 0 !important;
 }
 
-/* remove containers vazios */
 div[data-testid="stMarkdownContainer"]:empty{ display:none !important; }
 div.element-container:has(> div:empty){ display:none !important; }
 
-/* cards */
 .yv-card{
   background: var(--card);
   border-radius: 16px;
@@ -117,7 +113,6 @@ div.element-container:has(> div:empty){ display:none !important; }
   border: 1px solid rgba(14,27,42,0.12);
 }
 
-/* modo como botões segmentados */
 .yv-mode .stRadio > div{ background: transparent; border: none; padding: 0; box-shadow: none; }
 .yv-mode [role="radiogroup"]{ display:flex; gap: 10px; margin-top: 10px; }
 .yv-mode [role="radio"]{
@@ -130,12 +125,11 @@ div.element-container:has(> div:empty){ display:none !important; }
   justify-content:center;
 }
 .yv-mode [role="radio"][aria-checked="true"]{ color:#fff !important; border-color: transparent; }
+.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="INVENTARIO"]{ background: var(--accent-inv); }
 .yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="ENTRADA"]{ background: var(--accent-in); }
 .yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="SAIDA"]{ background: var(--accent-out); }
-.yv-mode .stRadio [role="radio"][aria-checked="true"][aria-label="INVENTARIO"]{ background: var(--accent-inv); }
 .yv-mode [role="radio"][aria-checked="true"] *{ color:#fff !important; }
 
-/* inputs bem evidentes */
 div[data-baseweb="input"] input,
 div[data-baseweb="textarea"] textarea{
   background: var(--field-bg) !important;
@@ -149,7 +143,6 @@ div[data-baseweb="textarea"] textarea:focus{
   outline: none !important;
 }
 
-/* botões */
 button[kind="primary"]{
   border-radius: 14px !important;
   font-weight: 900 !important;
@@ -158,7 +151,6 @@ button[kind="primary"]{
 }
 button{ border-radius: 12px !important; }
 
-/* reduzir margens padrão */
 .stTextInput, .stNumberInput, .stRadio{
   margin-top: 0.15rem !important;
   margin-bottom: 0.15rem !important;
@@ -177,6 +169,30 @@ button{ border-radius: 12px !important; }
 # =========================
 def now_local_iso() -> str:
     return datetime.now(TZ).isoformat(timespec="seconds")
+
+
+def login_expiry_iso() -> str:
+    return (datetime.now(TZ) + timedelta(days=LOGIN_TTL_DAYS)).isoformat(timespec="seconds")
+
+
+def cookie_login_is_valid() -> bool:
+    raw = cookies.get("login_expires_at")
+    if not raw:
+        return False
+    try:
+        exp = datetime.fromisoformat(str(raw))
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=TZ)
+        return datetime.now(TZ) <= exp
+    except Exception:
+        return False
+
+
+def clear_login_cookies():
+    cookies["user_id"] = ""
+    cookies["user_nome"] = ""
+    cookies["login_expires_at"] = ""
+    cookies.save()
 
 
 def with_retry(fn, *, tries=3, base_sleep=0.7):
@@ -205,7 +221,6 @@ def gs_client():
 def open_sheet():
     def _open():
         return gs_client().open_by_key(SPREADSHEET_ID)
-
     return with_retry(_open)
 
 
@@ -214,7 +229,6 @@ def normalize_cell(v):
         return ""
     try:
         import numpy as np
-
         if isinstance(v, (np.integer,)):
             return int(v)
         if isinstance(v, (np.floating,)):
@@ -225,7 +239,6 @@ def normalize_cell(v):
         pass
     try:
         from decimal import Decimal
-
         if isinstance(v, Decimal):
             return float(v)
     except Exception:
@@ -386,6 +399,7 @@ def apply_delta(item_id: str, delta: float) -> float:
 
 def reset_for_next_item():
     st.query_params.clear()
+    st.session_state["mode"] = "INVENTARIO"
     st.session_state["item_key"] = int(st.session_state.get("item_key", 0)) + 1
     st.session_state["qty_key"] = int(st.session_state.get("qty_key", 0)) + 1
     st.rerun()
@@ -394,18 +408,22 @@ def reset_for_next_item():
 # =========================
 # Session defaults
 # =========================
-st.session_state.setdefault("mode", "ENTRADA")
+st.session_state.setdefault("mode", "INVENTARIO")
 st.session_state.setdefault("item_key", 0)
 st.session_state.setdefault("qty_key", 0)
 
 # =========================
-# Persistent login from cookies
+# Persistent login from cookies for 7 days
 # =========================
 cookie_user_id = cookies.get("user_id")
 cookie_user_nome = cookies.get("user_nome")
+
 if cookie_user_id and "user_id" not in st.session_state:
-    st.session_state["user_id"] = str(cookie_user_id)
-    st.session_state["user_nome"] = str(cookie_user_nome or "")
+    if cookie_login_is_valid():
+        st.session_state["user_id"] = str(cookie_user_id)
+        st.session_state["user_nome"] = str(cookie_user_nome or "")
+    else:
+        clear_login_cookies()
 
 # =========================
 # Load users
@@ -417,11 +435,13 @@ else:
     users_df["ativo_norm"] = True
 users_active = users_df[users_df["ativo_norm"]].copy()
 
+
 def user_row_by_name(name: str):
     r = users_active[users_active["nome"].astype(str) == str(name)]
     if r.empty:
         return None
     return r.iloc[0]
+
 
 def user_row_by_id(user_id: str):
     if "user_id" not in users_active.columns:
@@ -431,15 +451,13 @@ def user_row_by_id(user_id: str):
         return None
     return r.iloc[0]
 
-# if cookie points to non-existent user
+
 if "user_id" in st.session_state:
     urow = user_row_by_id(st.session_state["user_id"])
     if urow is None:
         st.session_state.pop("user_id", None)
         st.session_state.pop("user_nome", None)
-        cookies["user_id"] = ""
-        cookies["user_nome"] = ""
-        cookies.save()
+        clear_login_cookies()
 
 # =========================
 # Login screen
@@ -462,6 +480,7 @@ if "user_id" not in st.session_state:
 
             cookies["user_id"] = st.session_state["user_id"]
             cookies["user_nome"] = st.session_state["user_nome"]
+            cookies["login_expires_at"] = login_expiry_iso()
             cookies.save()
 
             toast_ok("Logado")
@@ -473,7 +492,7 @@ if "user_id" not in st.session_state:
     st.stop()
 
 # =========================
-# Sidebar: saldo only for manager
+# Sidebar
 # =========================
 urow = user_row_by_id(st.session_state["user_id"])
 is_manager = bool(is_manager_row(urow)) if urow is not None else False
@@ -509,7 +528,7 @@ with st.sidebar:
         st.info("Acesso restrito ao nível gestor.")
 
 # =========================
-# Top area (no st.columns, avoids iOS strips)
+# Top area
 # =========================
 st.markdown('<div class="yv-shell">', unsafe_allow_html=True)
 
@@ -521,28 +540,29 @@ st.markdown(
 if st.button("Sair", use_container_width=False):
     st.session_state.pop("user_id", None)
     st.session_state.pop("user_nome", None)
-    cookies["user_id"] = ""
-    cookies["user_nome"] = ""
-    cookies.save()
+    clear_login_cookies()
     st.rerun()
 st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown('<div class="yv-card yv-mode">', unsafe_allow_html=True)
+MODE_OPTIONS = ["INVENTARIO", "ENTRADA", "SAIDA"]
+
 mode = st.radio(
     "Modo",
-    options=["ENTRADA", "SAIDA", "INVENTARIO"],
+    options=MODE_OPTIONS,
     horizontal=True,
-    index=["ENTRADA", "SAIDA", "INVENTARIO"].index(st.session_state.get("mode", "ENTRADA")),
+    index=MODE_OPTIONS.index(st.session_state.get("mode", "INVENTARIO")),
     label_visibility="collapsed",
 )
 st.session_state["mode"] = mode
 st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================
-# Item input: auto load on Enter, always uppercase
+# Item input
 # =========================
 qp = st.query_params
 param_item = qp.get("item", None)
+
 
 def on_item_change(key: str):
     raw = st.session_state.get(key, "")
@@ -550,6 +570,7 @@ def on_item_change(key: str):
     if item_norm:
         st.query_params["item"] = item_norm
         st.rerun()
+
 
 item_input_key = f"item_input_{st.session_state['item_key']}"
 
@@ -571,7 +592,6 @@ if not param_item:
 
 item_id = normalize_item_id(param_item)
 
-# Allow quick change of item even when already loaded
 st.markdown('<div class="yv-card">', unsafe_allow_html=True)
 st.markdown(f'<span class="yv-chip">Item atual: {item_id}</span>', unsafe_allow_html=True)
 st.markdown('<p class="yv-sub">Trocar item: digite outro ID e pressione Enter</p>', unsafe_allow_html=True)
@@ -623,9 +643,9 @@ if st.session_state["mode"] == "SAIDA":
         needs_confirm = st.checkbox("Confirmar mesmo assim")
 
 btn_label = {
+    "INVENTARIO": "Confirmar contagem",
     "ENTRADA": "Confirmar entrada",
     "SAIDA": "Confirmar saída",
-    "INVENTARIO": "Confirmar contagem",
 }[st.session_state["mode"]]
 
 if st.button(btn_label, type="primary", use_container_width=True):
@@ -641,13 +661,11 @@ if st.button(btn_label, type="primary", use_container_width=True):
             st.error("Marque a confirmação para permitir saldo negativo.")
             st.stop()
 
-    # INVENTARIO: grava contagem, cria ajuste e aplica delta
     if st.session_state["mode"] == "INVENTARIO":
         saldo_teorico = float(saldo_atual)
         contado = float(qtd_f)
         diferenca = float(contado - saldo_teorico)
 
-        # contagem
         try:
             append_row(
                 "CONTAGENS",
@@ -664,7 +682,6 @@ if st.button(btn_label, type="primary", use_container_width=True):
         except Exception:
             pass
 
-        # ajuste se necessário
         if abs(diferenca) > 1e-9:
             sinal_store = 1 if diferenca > 0 else -1
 
@@ -689,7 +706,6 @@ if st.button(btn_label, type="primary", use_container_width=True):
         reset_for_next_item()
 
     else:
-        # ENTRADA / SAIDA
         if st.session_state["mode"] == "ENTRADA":
             acao = "ENTRADA"
             delta = float(qtd_f)
